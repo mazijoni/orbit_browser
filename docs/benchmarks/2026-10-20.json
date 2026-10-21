@@ -1,0 +1,144 @@
+{
+  "Meta": {
+    "Date": "2026-10-20 23:47",
+    "OS": "Microsoft Windows 11 Home 10.0.26200.0",
+    "CPU": "AMD Ryzen 5 7600 6-Core Processor              ",
+    "RAM_GB": 15.2,
+    "Strata": "Release build, CEF 152.0.14+g8a0b5b9+chromium-152.0.7977.167",
+    "Edge": "155.0.4283.62"
+  },
+  "Results": [
+    {
+      "Browser": "strata",
+      "Scenario": "pages-1",
+      "Tabs": 1,
+      "WindowMs": 239,
+      "Processes": 7,
+      "PrivateWS_MB": 119.2,
+      "WS_MB": 423.1,
+      "Commit_MB": 270.0,
+      "IdleCpuPct": 2.03
+    },
+    {
+      "Browser": "strata",
+      "Scenario": "pages-5",
+      "Tabs": 5,
+      "WindowMs": 170,
+      "Processes": 11,
+      "PrivateWS_MB": 215.5,
+      "WS_MB": 685.8,
+      "Commit_MB": 408.3,
+      "IdleCpuPct": 1.09
+    },
+    {
+      "Browser": "strata",
+      "Scenario": "pages-10",
+      "Tabs": 10,
+      "WindowMs": 177,
+      "Processes": 16,
+      "PrivateWS_MB": 334.9,
+      "WS_MB": 1015.7,
+      "Commit_MB": 602.8,
+      "IdleCpuPct": 2.66
+    },
+    {
+      "Browser": "strata",
+      "Scenario": "pages-25",
+      "Tabs": 25,
+      "WindowMs": 173,
+      "Processes": 26,
+      "PrivateWS_MB": 565.8,
+      "WS_MB": 1662.4,
+      "Commit_MB": 946.6,
+      "IdleCpuPct": 12.5
+    },
+    {
+      "Browser": "strata",
+      "Scenario": "pages-50",
+      "Tabs": 50,
+      "WindowMs": 172,
+      "Processes": 26,
+      "PrivateWS_MB": 547.1,
+      "WS_MB": 1650.1,
+      "Commit_MB": 982.1,
+      "IdleCpuPct": 0.31
+    },
+    {
+      "Browser": "strata",
+      "Scenario": "pages-25-slept",
+      "Tabs": 25,
+      "WindowMs": 170,
+      "Processes": 7,
+      "PrivateWS_MB": 149.5,
+      "WS_MB": 459.1,
+      "Commit_MB": 420.4,
+      "IdleCpuPct": 10.94
+    },
+    {
+      "Browser": "strata",
+      "Scenario": "restored-25",
+      "Tabs": 0,
+      "WindowMs": 172,
+      "Processes": 6,
+      "PrivateWS_MB": 99.7,
+      "WS_MB": 358.0,
+      "Commit_MB": 237.6,
+      "IdleCpuPct": 0.94
+    },
+    {
+      "Browser": "edge",
+      "Scenario": "pages-1",
+      "Tabs": 1,
+      "WindowMs": 279,
+      "Processes": 15,
+      "PrivateWS_MB": 198.8,
+      "WS_MB": 722.4,
+      "Commit_MB": 359.8,
+      "IdleCpuPct": 7.66
+    },
+    {
+      "Browser": "edge",
+      "Scenario": "pages-5",
+      "Tabs": 5,
+      "WindowMs": 303,
+      "Processes": 14,
+      "PrivateWS_MB": 223.6,
+      "WS_MB": 725.1,
+      "Commit_MB": 378.8,
+      "IdleCpuPct": 0.78
+    },
+    {
+      "Browser": "edge",
+      "Scenario": "pages-10",
+      "Tabs": 10,
+      "WindowMs": 542,
+      "Processes": 19,
+      "PrivateWS_MB": 323.6,
+      "WS_MB": 1009.5,
+      "Commit_MB": 524.0,
+      "IdleCpuPct": 2.03
+    },
+    {
+      "Browser": "edge",
+      "Scenario": "pages-25",
+      "Tabs": 25,
+      "WindowMs": 641,
+      "Processes": 34,
+      "PrivateWS_MB": 640.1,
+      "WS_MB": 1880.5,
+      "Commit_MB": 979.1,
+      "IdleCpuPct": 1.25
+    },
+    {
+      "Browser": "edge",
+      "Scenario": "pages-50",
+      "Tabs": 50,
+      "WindowMs": 1075,
+      "Processes": 56,
+      "PrivateWS_MB": 1033.4,
+      "WS_MB": 3113.8,
+      "Commit_MB": 1530.7,
+      "IdleCpuPct": 0.16
+    }
+  ]
+}

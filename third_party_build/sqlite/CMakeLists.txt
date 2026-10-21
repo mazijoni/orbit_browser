@@ -1,0 +1,12 @@
+add_library(sqlite3 STATIC "${ORBIT_SQLITE_DIR}/sqlite3.c")
+target_include_directories(sqlite3 PUBLIC "${ORBIT_SQLITE_DIR}")
+target_compile_definitions(sqlite3 PRIVATE
+  SQLITE_DQS=0
+  SQLITE_THREADSAFE=1
+  SQLITE_DEFAULT_FOREIGN_KEYS=1
+  SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+  SQLITE_OMIT_LOAD_EXTENSION
+  SQLITE_OMIT_DEPRECATED
+  SQLITE_ENABLE_FTS5
+  SQLITE_WIN32_MALLOC)
+target_compile_options(sqlite3 PRIVATE /W0 /Zi)

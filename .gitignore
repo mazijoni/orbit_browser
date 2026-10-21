@@ -1,0 +1,7 @@
+/out/
+/third_party/cef/
+/third_party/sqlite/
+/third_party/downloads/
+*.user
+.vs/
+/dist/
