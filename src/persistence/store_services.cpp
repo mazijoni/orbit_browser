@@ -45,6 +45,30 @@ std::vector<HistoryRecord> Store::QueryHistory(int64_t profile_id, const std::ws
   return out;
 }
 
+std::vector<HistoryRecord> Store::QueryHistoryFrecent(int64_t profile_id, const std::wstring& query,
+                                                      int64_t now_ms, int limit) {
+  std::vector<HistoryRecord> out;
+  // SQLite takes the bare columns (title, id) from the row max() picks.
+  auto s = db_.Prepare(
+      "SELECT id, url, title, MAX(visit_time), "
+      "SUM(CASE WHEN ?2 - visit_time < 345600000 THEN 100 WHEN ?2 - visit_time < 1209600000 THEN 70 "
+      "WHEN ?2 - visit_time < 2678400000 THEN 50 WHEN ?2 - visit_time < 7776000000 THEN 30 ELSE 10 END) "
+      "AS frecency FROM history WHERE profile_id = ?1 AND (?3 = '' OR instr(lower(url), lower(?3)) > 0 OR "
+      "instr(lower(title), lower(?3)) > 0) GROUP BY url ORDER BY frecency DESC, MAX(visit_time) DESC "
+      "LIMIT ?4");
+  s.Bind(1, profile_id).Bind(2, now_ms).Bind(3, query).Bind(4, limit);
+  while (s.Step()) {
+    HistoryRecord h;
+    h.id = s.ColumnInt64(0);
+    h.profile_id = profile_id;
+    h.url = s.ColumnText(1);
+    h.title = s.ColumnText(2);
+    h.visit_time = s.ColumnInt64(3);
+    out.push_back(std::move(h));
+  }
+  return out;
+}
+
 bool Store::DeleteVisit(int64_t profile_id, int64_t id) {
   auto s = db_.Prepare("DELETE FROM history WHERE profile_id = ? AND id = ?");
   s.Bind(1, profile_id).Bind(2, id);

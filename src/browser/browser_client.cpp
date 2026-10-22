@@ -1,5 +1,13 @@
 #include "browser/browser_client.h"
 
+#include "browser/boost_apply.h"
+
+#include <cmath>
+
+#include "include/cef_parser.h"
+
+#include "app/orbit_app.h"
+
 #include "app/application.h"
 #include "browser/downloads.h"
 #include "browser/external_protocol.h"
@@ -18,7 +26,55 @@ BrowserWindow* WindowFor(Tab* tab) {
   return (tab && tab->workspace()) ? tab->workspace()->window() : nullptr;
 }
 
+constexpr int kMenuSplitLink = MENU_ID_USER_FIRST + 1;
+constexpr int kMenuGlanceLink = MENU_ID_USER_FIRST + 2;
+
+bool IsWebLink(const std::wstring& url) {
+  return url.rfind(L"https://", 0) == 0 || url.rfind(L"http://", 0) == 0;
+}
+
 }  // namespace
+
+void BrowserClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>,
+                                        CefRefPtr<CefContextMenuParams> params,
+                                        CefRefPtr<CefMenuModel> model) {
+  // canOpenLinkInSplitView: web links of tabs in a space (not Essentials).
+  Tab* tab = FindTab(browser->GetIdentifier());
+  if (!tab || !WindowFor(tab) || !(params->GetTypeFlags() & CM_TYPEFLAG_LINK)) return;
+  if (!IsWebLink(params->GetLinkUrl().ToWString())) return;
+  model->InsertItemAt(0, kMenuGlanceLink, "Open Link in Glance");
+  model->InsertItemAt(1, kMenuSplitLink, "Split Link to New Tab");
+  model->InsertSeparatorAt(2);
+}
+
+bool BrowserClient::OnContextMenuCommand(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>,
+                                         CefRefPtr<CefContextMenuParams> params, int command_id,
+                                         EventFlags) {
+  if (command_id != kMenuSplitLink && command_id != kMenuGlanceLink) return false;
+  Tab* tab = FindTab(browser->GetIdentifier());
+  const std::wstring url = params->GetLinkUrl().ToWString();
+  if (BrowserWindow* w = WindowFor(tab); w && IsWebLink(url)) {
+    if (command_id == kMenuGlanceLink) {
+      w->OpenGlance(tab, url);
+    } else {
+      w->SplitLinkInNewTab(tab, url);
+    }
+  }
+  return true;
+}
+
+bool BrowserClient::OnKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
+                               CefEventHandle) {
+  if (event.type != KEYEVENT_RAWKEYDOWN || event.windows_key_code != VK_ESCAPE ||
+      event.modifiers & (EVENTFLAG_SHIFT_DOWN | EVENTFLAG_CONTROL_DOWN | EVENTFLAG_ALT_DOWN)) {
+    return false;
+  }
+  Tab* tab = FindTab(browser->GetIdentifier());
+  BrowserWindow* w = WindowFor(tab);
+  if (!w || !w->IsGlanceTab(tab)) return false;
+  w->CloseGlanceAnimated();
+  return true;
+}
 
 Tab* BrowserClient::FindTab(int browser_id) const {
   auto it = tabs_.find(browser_id);
@@ -34,6 +90,7 @@ bool BrowserClient::OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFr
                                   CefBrowserSettings& settings,
                                   CefRefPtr<CefDictionaryValue>& extra_info,
                                   bool* no_javascript_access) {
+  extra_info = Application::Get()->RendererInfo();
   Tab* opener = FindTab(browser->GetIdentifier());
   BrowserWindow* window = WindowFor(opener);
   if (!window) return true;  // cancel
@@ -151,7 +208,85 @@ bool BrowserClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                                              CefRefPtr<CefFrame> frame,
                                              CefProcessId source_process,
                                              CefRefPtr<CefProcessMessage> message) {
-  // Renderer replies are untrusted input: only a single bool is read.
+  // Renderer messages are untrusted input: each reads one typed argument.
+  if (message->GetName() == kGlanceOpenMessage) {
+    Tab* tab = FindTab(browser->GetIdentifier());
+    CefRefPtr<CefListValue> args = message->GetArgumentList();
+    if (tab && (args->GetSize() == 1 || args->GetSize() == 5) && args->GetType(0) == VTYPE_STRING) {
+      const std::wstring url = args->GetString(0).ToWString();
+      // Optional link rect (CSS px in the page's viewport), sanity-checked.
+      std::optional<BrowserWindow::GlanceOrigin> origin;
+      if (args->GetSize() == 5) {
+        double v[4] = {};
+        bool ok = true;
+        for (size_t i = 0; i < 4 && ok; ++i) {
+          ok = args->GetType(i + 1) == VTYPE_DOUBLE;
+          if (ok) v[i] = args->GetDouble(i + 1);
+          ok = ok && std::isfinite(v[i]) && std::abs(v[i]) < 1e6;
+        }
+        if (ok && v[2] >= 0.0 && v[3] >= 0.0) {
+          origin = BrowserWindow::GlanceOrigin{v[0], v[1], v[2], v[3],
+                                               std::pow(1.2, browser->GetHost()->GetZoomLevel())};
+        }
+      }
+      if (url.size() <= 8192 && IsWebLink(url) && !Application::Get()->GlanceTrigger().empty()) {
+        if (BrowserWindow* w = WindowFor(tab)) w->OpenGlance(tab, url, origin);
+      }
+    }
+    return true;
+  }
+  if (message->GetName() == kMediaStateMessage) {
+    Tab* tab = FindTab(browser->GetIdentifier());
+    CefRefPtr<CefListValue> args = message->GetArgumentList();
+    if (!tab || !frame || args->GetSize() != 1 || args->GetType(0) != VTYPE_STRING) return true;
+    const std::string json = args->GetString(0).ToString();
+    if (json.size() > 2048) return true;
+    CefRefPtr<CefValue> value = CefParseJSON(json, JSON_PARSER_RFC);
+    CefRefPtr<CefDictionaryValue> d = value ? value->GetDictionary() : nullptr;
+    if (!d) return true;
+    Tab::MediaState s;
+    const std::string state = d->GetString("state").ToString();
+    s.state = state == "playing" ? Tab::MediaState::State::kPlaying
+            : state == "paused"  ? Tab::MediaState::State::kPaused
+                                 : Tab::MediaState::State::kNone;
+    s.title = d->GetString("title").ToWString().substr(0, 200);
+    s.artist = d->GetString("artist").ToWString().substr(0, 200);
+    auto number = [&](const char* key) {
+      const double v = d->GetType(key) == VTYPE_DOUBLE ? d->GetDouble(key)
+                     : d->GetType(key) == VTYPE_INT  ? d->GetInt(key) : 0.0;
+      return std::isfinite(v) && v >= 0.0 && v < 1e7 ? v : 0.0;
+    };
+    s.time = number("time");
+    s.duration = number("duration");
+    s.updated_at = ::GetTickCount64();
+    tab->OnMediaState(frame->GetIdentifier().ToString(), s);
+    return true;
+  }
+  if (message->GetName() == kBoostPickMessage) {
+    // A trusted click in a page in pick mode (the window checks it is the
+    // page its editor is open for, and the mode).
+    Tab* tab = FindTab(browser->GetIdentifier());
+    CefRefPtr<CefListValue> args = message->GetArgumentList();
+    if (tab && frame && frame->IsMain() && args->GetSize() == 2 && args->GetType(0) == VTYPE_STRING &&
+        args->GetType(1) == VTYPE_STRING) {
+      if (BrowserWindow* w = WindowFor(tab)) {
+        w->OnBoostPicked(tab, args->GetString(0).ToWString().substr(0, 8), args->GetString(1).ToWString());
+      }
+    }
+    return true;
+  }
+  if (message->GetName() == kWindowDragMessage) {
+    Tab* tab = FindTab(browser->GetIdentifier());
+    CefRefPtr<CefListValue> args = message->GetArgumentList();
+    // Only while the left button is physically down: a page cannot fake that.
+    if (tab && args->GetSize() == 1 && args->GetType(0) == VTYPE_DOUBLE &&
+        ::GetAsyncKeyState(VK_LBUTTON) < 0 &&
+        Application::Get()->store().GetPref(Store::kGlobalScope, L"drag_window_from_content")
+                .value_or(L"1") == L"1") {
+      if (BrowserWindow* w = WindowFor(tab)) w->StartWindowDrag(args->GetDouble(0));
+    }
+    return true;
+  }
   if (message->GetName() != "orbit.media-reply") return false;
   Tab* tab = FindTab(browser->GetIdentifier());
   CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -161,9 +296,16 @@ bool BrowserClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
   return true;
 }
 
+void BrowserClient::OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                                TransitionType) {
+  // Boosts: the site's look applies as the page starts (and again below).
+  if (frame->IsMain()) ApplyBoost(FindTab(browser->GetIdentifier()));
+}
+
 void BrowserClient::OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                               int httpStatusCode) {
   if (!frame->IsMain()) return;
+  ApplyBoost(FindTab(browser->GetIdentifier()));
   // Error pages (status 0) and failed loads are not recorded as history.
   if (httpStatusCode <= 0 || httpStatusCode >= 400) return;
   if (Tab* tab = FindTab(browser->GetIdentifier())) Application::Get()->RecordVisit(tab);
@@ -191,6 +333,7 @@ bool BrowserClient::OnBeforeDownload(CefRefPtr<CefBrowser> browser,
   Tab* tab = FindTab(browser->GetIdentifier());
   Application::Get()->downloads().OnBeforeDownload(tab ? tab->profile() : nullptr, download_item,
                                                    suggested_name, callback);
+  if (BrowserWindow* window = tab ? tab->window() : nullptr) window->AnimateDownload();
   return true;
 }
 
@@ -241,8 +384,13 @@ bool BrowserClient::OnJSDialog(CefRefPtr<CefBrowser> browser, const CefString& o
 bool BrowserClient::OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
                                   CefEventHandle os_event, bool* is_keyboard_shortcut) {
   if (event.type != KEYEVENT_RAWKEYDOWN) return false;
-  BrowserWindow* window = WindowFor(FindTab(browser->GetIdentifier()));
+  Tab* tab = FindTab(browser->GetIdentifier());
+  BrowserWindow* window = WindowFor(tab);
   if (!window) return false;
+  // The settings page is recording a shortcut: let it see the keys.
+  if (Application::Get()->ShortcutRecording() && tab->url().rfind(L"orbit://settings/", 0) == 0) {
+    return false;
+  }
   const bool ctrl = (event.modifiers & EVENTFLAG_CONTROL_DOWN) != 0;
   const bool shift = (event.modifiers & EVENTFLAG_SHIFT_DOWN) != 0;
   const bool alt = (event.modifiers & EVENTFLAG_ALT_DOWN) != 0;
@@ -261,8 +409,8 @@ bool BrowserClient::OnOpenURLFromTab(CefRefPtr<CefBrowser> browser, CefRefPtr<Ce
   Tab* opener = FindTab(browser->GetIdentifier());
   BrowserWindow* window = WindowFor(opener);
   if (!window) return false;
-  window->OpenTabNear(opener, target_url.ToWString(),
-                      target_disposition != CEF_WOD_NEW_BACKGROUND_TAB);
+  window->OpenRoutedTab(target_url.ToWString(), target_disposition != CEF_WOD_NEW_BACKGROUND_TAB,
+                        /*external=*/false, opener);
   return true;
 }
 

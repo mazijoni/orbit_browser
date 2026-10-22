@@ -108,7 +108,78 @@ CREATE TABLE downloads (
 CREATE INDEX downloads_profile ON downloads(profile_id, started_at DESC);
 )sql";
 
-constexpr const char* kMigrations[] = {kMigrationV1, kMigrationV2};
+// v3: tabs closed together (close all unpinned, close others, ...) share a
+// batch id so that one "reopen closed tab" restores all of them, as in Firefox.
+constexpr const char* kMigrationV3 = R"sql(
+ALTER TABLE closed_tabs ADD COLUMN batch_id INTEGER NOT NULL DEFAULT 0;
+)sql";
+
+// v4: the URL a pinned tab returns to when it is reset (Zen's pinned initial
+// state). Existing pinned tabs get their current URL when loaded.
+constexpr const char* kMigrationV4 = R"sql(
+ALTER TABLE tabs ADD COLUMN pinned_url TEXT NOT NULL DEFAULT '';
+)sql";
+
+// v5: a label the user gave a tab (Zen's "Change Label…", zenStaticLabel).
+constexpr const char* kMigrationV5 = R"sql(
+ALTER TABLE tabs ADD COLUMN custom_title TEXT NOT NULL DEFAULT '';
+)sql";
+
+// v6: a profile's Essentials live in a workspace row of kind 1, which is
+// never shown as a space (Zen's essentials are shared by all spaces of a
+// container; Orbit's profiles play the container's role).
+constexpr const char* kMigrationV6 = R"sql(
+ALTER TABLE workspaces ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;
+)sql";
+
+// v7: split views (Zen's split view groups). `layout` is the layout tree in
+// SerializeSplit form, with tab ids as leaves.
+constexpr const char* kMigrationV7 = R"sql(
+CREATE TABLE split_views (
+  id INTEGER PRIMARY KEY,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  layout TEXT NOT NULL
+);
+CREATE INDEX split_views_workspace ON split_views(workspace_id);
+)sql";
+
+// v8: nested folders (ZenFolders subfolders) and folder icons.
+constexpr const char* kMigrationV8 = R"sql(
+ALTER TABLE tab_groups ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tab_groups ADD COLUMN icon TEXT NOT NULL DEFAULT '';
+)sql";
+
+// v9: live folders (src/zen/live-folders): a folder's provider state and
+// dismissed items; tabs remember the item they show and its sublabel.
+constexpr const char* kMigrationV9 = R"sql(
+ALTER TABLE tabs ADD COLUMN live_item TEXT NOT NULL DEFAULT '';
+ALTER TABLE tabs ADD COLUMN sublabel TEXT NOT NULL DEFAULT '';
+CREATE TABLE live_folders (
+  group_id INTEGER PRIMARY KEY REFERENCES tab_groups(id) ON DELETE CASCADE,
+  state TEXT NOT NULL,
+  dismissed TEXT NOT NULL DEFAULT ''
+);
+)sql";
+
+// v10: a space's theme from the gradient picker (SerializeSpaceTheme; empty:
+// the plain space colour).
+constexpr const char* kMigrationV10 = R"sql(
+ALTER TABLE workspaces ADD COLUMN theme TEXT NOT NULL DEFAULT '';
+)sql";
+
+// v11: boosts (src/zen/boosts), one per site and profile (SerializeBoost).
+constexpr const char* kMigrationV11 = R"sql(
+CREATE TABLE boosts (
+  profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  domain TEXT NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (profile_id, domain)
+);
+)sql";
+
+constexpr const char* kMigrations[] = {kMigrationV1, kMigrationV2, kMigrationV3, kMigrationV4,
+                                       kMigrationV5, kMigrationV6, kMigrationV7, kMigrationV8,
+                                       kMigrationV9, kMigrationV10, kMigrationV11};
 static_assert(sizeof(kMigrations) / sizeof(kMigrations[0]) == kSchemaVersion);
 
 }  // namespace

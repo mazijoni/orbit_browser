@@ -4,13 +4,15 @@
 
 #include <cstdint>
 
+#include "core/space_theme.h"
+
 namespace orbit::ui {
 
 // Shared design tokens. Sizes are in DIPs (1/96 inch); colors are sRGB.
 // Values follow Zen Browser's single-toolbar layout (zen-theme.css,
 // vertical-tabs.css, zen-browser-ui.css; MPL-2.0), translated to native drawing.
 namespace metrics {
-inline constexpr float kSidebarDefaultWidth = 220.f;
+inline constexpr float kSidebarDefaultWidth = 186.f;  // ZenCustomizableUI kDefaultSidebarWidth (Windows)
 inline constexpr float kSidebarMinWidth = 163.f;   // --zen-toolbox-min-width
 inline constexpr float kSidebarMaxWidth = 500.f;   // zen.view.sidebar-expanded.max-width
 inline constexpr float kSidebarCompactWidth = 60.f;  // --tab-min-width + 2 * padding
@@ -18,6 +20,7 @@ inline constexpr float kToolboxPadding = 5.f;      // --zen-toolbox-padding
 inline constexpr float kSeparation = 8.f;          // zen.theme.content-element-separation
 inline constexpr float kContentRadius = 8.f;
 inline constexpr float kTopRowHeight = 38.f;       // sidebar top buttons
+inline constexpr float kToolbarHeight = 40.f;      // multiple toolbars: the nav-bar above the page
 inline constexpr float kCaptionHeight = 32.f;      // revealed window-control strip
 inline constexpr float kCaptionButtonWidth = 46.f;
 inline constexpr float kUrlBarHeight = 36.f;
@@ -69,6 +72,10 @@ inline constexpr wchar_t kMore = 0xE712;
 inline constexpr wchar_t kFolder = 0xE8B7;
 inline constexpr wchar_t kFolderOpen = 0xE838;
 inline constexpr wchar_t kArrowDown = 0xE74B;
+inline constexpr wchar_t kCopy = 0xE8C8;
+inline constexpr wchar_t kOpenInNew = 0xE8A7;   // OpenInNewWindow: glance "expand"
+inline constexpr wchar_t kOpenPane = 0xE8A0;    // OpenPane: glance "split"
+inline constexpr wchar_t kLibrary = 0xE8F1;     // Library: the library panel button
 inline constexpr wchar_t kMinimize = 0xE921;   // ChromeMinimize
 inline constexpr wchar_t kMaximize = 0xE922;   // ChromeMaximize
 inline constexpr wchar_t kRestore = 0xE923;    // ChromeRestore
@@ -117,7 +124,12 @@ D2D1_COLOR_F Over(const D2D1_COLOR_F& over, const D2D1_COLOR_F& under);
 struct Backdrop {
   D2D1_COLOR_F from;
   D2D1_COLOR_F to;
+  // A space themed with the gradient picker paints Zen's layers instead.
+  bool themed = false;
+  orbit::ThemePaint paint;
 };
+D2D1_COLOR_F ColorFromRgbF(const orbit::Rgb& c, float alpha = 1.f);
+uint32_t RgbToUint(const orbit::Rgb& c);
 Backdrop MakeBackdrop(const Palette& palette, uint32_t workspace_rgb, float strength);
 
 // Default accent choices offered in settings (0xRRGGBB).

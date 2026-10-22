@@ -175,4 +175,116 @@ OmniboxResult FixupOmniboxInput(std::wstring_view raw, std::wstring_view search_
   return make_search();
 }
 
+namespace {
+std::wstring NormalizeForPinCompare(std::wstring_view url) {
+  std::wstring text(url.substr(0, url.find(L'#')));
+  const size_t scheme_end = text.find(L"://");
+  if (scheme_end != std::wstring::npos && text.find(L'/', scheme_end + 3) == std::wstring::npos) {
+    text += L'/';
+  }
+  return text;
+}
+}  // namespace
+
+bool PinnedUrlMatches(std::wstring_view current, std::wstring_view pinned) {
+  return NormalizeForPinCompare(current) == NormalizeForPinCompare(pinned);
+}
+
+std::wstring SidebarDisplayUrl(std::wstring_view url) {
+  std::wstring text(url);
+  // BrowserUIUtils.removeSingleTrailingSlashFromURL: ^((http|https|ftp)://[^/]+)/$
+  for (std::wstring_view scheme : {L"http://", L"https://", L"ftp://"}) {
+    if (text.rfind(scheme, 0) == 0 && text.size() > scheme.size() + 1 &&
+        text.find(L'/', scheme.size()) == text.size() - 1) {
+      text.pop_back();
+      break;
+    }
+  }
+  constexpr std::wstring_view kHttps = L"https://";
+  if (text.rfind(kHttps, 0) == 0) {
+    const size_t host_end = text.find(L'/', kHttps.size());
+    text = text.substr(kHttps.size(), host_end == std::wstring::npos
+                                          ? std::wstring::npos
+                                          : host_end - kHttps.size());
+  }
+  if (text.rfind(L"www.", 0) == 0) text.erase(0, 4);
+  return text;
+}
+
+namespace {
+
+// Curated from Firefox's query-stripping and strip-on-share lists.
+constexpr std::wstring_view kStripGlobal[] = {
+    L"fbclid", L"gclid", L"gclsrc", L"dclid", L"gbraid", L"wbraid", L"msclkid", L"mc_eid", L"mc_cid",
+    L"oly_anon_id", L"oly_enc_id", L"__s", L"vero_id", L"vero_conv", L"_hsenc", L"_hsmi", L"mkt_tok",
+    L"igshid", L"igsh", L"twclid", L"ttclid", L"wickedid", L"yclid", L"ysclid", L"srsltid", L"_openstat",
+    L"rb_clickid", L"s_cid", L"ss_email_id", L"bsft_clkid", L"bsft_uid", L"ml_subscriber",
+    L"ml_subscriber_hash", L"epik", L"pk_campaign", L"pk_kwd", L"piwik_campaign", L"piwik_kwd",
+    L"mtm_campaign", L"mtm_cid", L"mtm_content", L"mtm_keyword", L"mtm_medium", L"mtm_source"};
+
+struct SiteRule {
+  std::wstring_view host;  // the host or a parent domain
+  std::wstring_view param;
+};
+constexpr SiteRule kStripSites[] = {
+    {L"youtube.com", L"si"}, {L"youtu.be", L"si"}, {L"youtube.com", L"pp"},
+    {L"open.spotify.com", L"si"}, {L"twitter.com", L"s"}, {L"twitter.com", L"t"},
+    {L"x.com", L"s"}, {L"x.com", L"t"}, {L"instagram.com", L"igsh"},
+    {L"linkedin.com", L"trk"}, {L"linkedin.com", L"trackingId"}, {L"reddit.com", L"share_id"},
+    {L"amazon.com", L"ref_"}, {L"tiktok.com", L"_t"}, {L"tiktok.com", L"_r"}};
+
+bool HostIs(std::wstring_view host, std::wstring_view domain) {
+  if (host.size() < domain.size()) return false;
+  if (host.substr(host.size() - domain.size()) != domain) return false;
+  return host.size() == domain.size() || host[host.size() - domain.size() - 1] == L'.';
+}
+
+}  // namespace
+
+std::wstring StripTrackingParams(std::wstring_view url) {
+  const bool https = StartsWithNoCase(url, L"https://");
+  if (!https && !StartsWithNoCase(url, L"http://")) return std::wstring(url);
+  const size_t host_start = https ? 8 : 7;
+  const size_t host_end = url.find_first_of(L"/?#", host_start);
+  std::wstring host = ToLowerAscii(url.substr(host_start, host_end == std::wstring_view::npos
+                                                              ? std::wstring_view::npos
+                                                              : host_end - host_start));
+  if (const size_t at = host.rfind(L'@'); at != std::wstring::npos) host = host.substr(at + 1);
+  if (const size_t colon = host.find(L':'); colon != std::wstring::npos) host.resize(colon);
+  const size_t q = url.find(L'?');
+  const size_t hash = url.find(L'#');
+  if (q == std::wstring_view::npos || (hash != std::wstring_view::npos && hash < q)) return std::wstring(url);
+  const size_t query_end = hash == std::wstring_view::npos ? url.size() : hash;
+  const std::wstring_view query = url.substr(q + 1, query_end - q - 1);
+  auto stripped = [&](std::wstring_view name) {
+    const std::wstring lower = ToLowerAscii(name);
+    if (lower.rfind(L"utm_", 0) == 0) return true;
+    for (std::wstring_view p : kStripGlobal) {
+      if (lower == p) return true;
+    }
+    for (const SiteRule& rule : kStripSites) {
+      if (name == rule.param && HostIs(host, rule.host)) return true;
+    }
+    return false;
+  };
+  std::wstring kept;
+  size_t start = 0;
+  while (start <= query.size()) {
+    size_t end = query.find(L'&', start);
+    if (end == std::wstring_view::npos) end = query.size();
+    const std::wstring_view pair = query.substr(start, end - start);
+    const std::wstring_view name = pair.substr(0, pair.find(L'='));
+    if (!pair.empty() && !stripped(name)) {
+      if (!kept.empty()) kept += L'&';
+      kept += pair;
+    }
+    if (end == query.size()) break;
+    start = end + 1;
+  }
+  std::wstring out(url.substr(0, q));
+  if (!kept.empty()) out += L"?" + kept;
+  out += url.substr(query_end);
+  return out;
+}
+
 }  // namespace orbit

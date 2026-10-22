@@ -189,6 +189,11 @@ InternalResponse BuildInternalResponse(const InternalRequest& req) {
     if (req.host == L"settings") return SettingsApi(req, profile);
     if (req.host == L"newtab") return NewTabApi(req, profile);
     if (req.host == L"diagnostics") return DiagnosticsApi(req, profile);
+    if (req.host == L"library") return LibraryApi(req, profile);
+    if (req.host == L"sitedata") return SiteDataApi(req, profile);
+    if (req.host == L"welcome") return WelcomeApi(req, profile);
+    if (req.host == L"theme") return ThemeApi(req, profile);
+    if (req.host == L"boost") return BoostApi(req, profile);
     return {404, "application/json", "{\"error\":\"not found\"}"};
   }
   if (req.host == L"newtab") return NewTabPage(req);
@@ -197,6 +202,11 @@ InternalResponse BuildInternalResponse(const InternalRequest& req) {
   if (req.host == L"downloads") return DownloadsPage(req);
   if (req.host == L"settings") return SettingsPage(req);
   if (req.host == L"diagnostics") return DiagnosticsPage(req);
+  if (req.host == L"library") return LibraryPage(req);
+  if (req.host == L"sitedata") return SiteDataPage(req);
+  if (req.host == L"welcome") return WelcomePage(req);
+  if (req.host == L"theme") return ThemePage(req);
+  if (req.host == L"boost") return BoostPage(req);
   if (req.host == L"selftest" && self_test::IsActive()) return SelfTestPage(req);
   return NotFound(req);
 }

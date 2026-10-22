@@ -37,9 +37,10 @@ try {
   $probe = Join-Path $root "out\$($Config.ToLower())\tools\uia_probe.exe"
   $native = & $probe $p.Id
   Check (@($native | Where-Object { $_ -match "^50004\tAddress and search bar\t" }).Count -eq 1) 'address bar is an Edit named "Address and search bar" (native UIA)'
-  # Fresh profile: its new-tab page plus the two URLs from the command line.
+  # Fresh profile: the two URLs from the command line. The new-tab page of the
+  # empty space is Zen's hidden empty tab and is not listed.
   $tabs = @($items | Where-Object Type -eq 'TabItem')
-  Check ($tabs.Count -eq 3) "three tab items exposed ($($tabs.Count))"
+  Check ($tabs.Count -eq 2) "two tab items exposed ($($tabs.Count))"
   $sel = [System.Windows.Automation.SelectionItemPattern]::Pattern
   $inactive = $tabs | Where-Object { -not $_.El.GetCurrentPattern($sel).Current.IsSelected } | Select-Object -First 1
   Check ($null -ne $inactive) "an inactive tab is reported ($($inactive.Name))"
@@ -47,8 +48,10 @@ try {
     $inactive.El.GetCurrentPattern($sel).Select()
     Start-Sleep -Milliseconds 800
     Check ($inactive.El.GetCurrentPattern($sel).Current.IsSelected) 'Select() via UIA activated the tab'
-    $p.Refresh()
-    Check ($p.MainWindowTitle -like "$($inactive.Name.Split(',')[0])*") "window title follows ($($p.MainWindowTitle))"
+    # Read the title from the Orbit window itself: Process.MainWindowTitle may
+    # pick another of the process's top-level windows (floating URL bar, toast).
+    $title = $win.Current.Name
+    Check ($title -like "$($inactive.Name.Split(',')[0])*") "window title follows ($title)"
   }
 } finally {
   & (Join-Path $PSScriptRoot 'close_orbit.ps1') -ProcessId $p.Id | Out-Null

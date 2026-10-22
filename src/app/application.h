@@ -6,6 +6,9 @@
 #include <vector>
 
 #include "include/cef_base.h"
+#include "include/cef_values.h"
+#include "browser/live_folders.h"
+#include "core/shortcuts.h"
 #include "persistence/database.h"
 #include "persistence/store.h"
 #include "ui/theme.h"
@@ -50,6 +53,19 @@ class Application {
   int exit_code() const { return exit_code_; }
   void set_exit_code(int code) { exit_code_ = code; }
   Store& store() { return *store_; }
+  LiveFolders& live_folders() { return live_folders_; }
+
+  // Keyboard shortcut overrides (prefs "shortcut:<id>": a chord, or "none").
+  const ShortcutMap& shortcuts() const { return shortcuts_; }
+  void SetShortcut(const std::wstring& id, const KeyChord& chord);  // persisted
+  void ResetShortcut(const std::wstring& id);                        // "" = all
+  // While the settings page records a chord, its keys reach the page instead
+  // of running shortcuts (expires after 15 s).
+  void SetShortcutRecording(bool on);
+  // Space routing (prefs "space_routes", "space_route_external"): the space
+  // a new tab for |url| belongs in, if a rule (or the external default) says so.
+  Workspace* RouteTarget(Profile* profile, const std::wstring& url, bool external);
+  bool ShortcutRecording() const;
   BrowserClient* client() const;
   DownloadManager& downloads() { return *downloads_; }
   PermissionManager& permissions() { return *permissions_; }
@@ -60,6 +76,11 @@ class Application {
   void UpdateVisitTitle(Tab* tab);
   // Re-reads theme/accent prefs and repaints every window.
   void ApplyThemeToAllWindows();
+  // zen.glance.enabled / zen.glance.activation-method: "alt", "ctrl",
+  // "shift", or "" when glance is off. Read by every new browser's renderer.
+  std::wstring GlanceTrigger();
+  // Extra info for a new browser's renderer (OrbitApp::OnBrowserCreated).
+  CefRefPtr<CefDictionaryValue> RendererInfo();
   void ApplySidebarModeToAllWindows(bool compact);
   void ApplyCompactModeToAllWindows(bool hidden);
 
@@ -84,13 +105,17 @@ class Application {
   void DeleteProfile(Profile* profile);
 
   // Windows.
+  // |start_empty|: the restored space opens on an empty tab instead of its
+  // last selected one (zen.workspaces.continue-where-left-off off).
   BrowserWindow* OpenWindow(Profile* profile, Workspace* workspace,
-                            const WindowRecord* placement);
+                            const WindowRecord* placement, bool start_empty = false);
   BrowserWindow* OpenPrivateWindow();
   const std::vector<std::unique_ptr<BrowserWindow>>& windows() const { return windows_; }
   void OnWindowCloseRequested(BrowserWindow* window);
   void CloseAllWindows();
   void OnWindowDestroyed(BrowserWindow* window);
+  // A closing window's own browser (its library panel) has closed.
+  void OnWindowBrowserClosed() { CheckPendingWindowCloses(); }
   // A workspace not shown in any window, or a new one if all are in use.
   Workspace* FreeWorkspaceFor(Profile* profile);
 
@@ -102,6 +127,11 @@ class Application {
   void DetachClosingTab(Tab* tab);
   void OnBrowserClosed(Tab* tab);
   bool ReopenClosedTab(BrowserWindow* window);
+  // The windows that display |ws|: its window, or for Essentials every window
+  // of its profile.
+  std::vector<BrowserWindow*> WindowsShowing(Workspace* ws) const;
+  // Closes |tabs| as one batch: reopening restores all of them at once.
+  void CloseTabsTogether(const std::vector<Tab*>& tabs);
 
   // Inactive-tab policy ("put to sleep after N minutes"); re-reads the pref.
   void UpdateSleepPolicy();
@@ -128,6 +158,10 @@ class Application {
   std::filesystem::path user_data_dir_;
   Database db_;
   std::unique_ptr<Store> store_;
+  ShortcutMap shortcuts_;
+  LiveFolders live_folders_;
+  unsigned long long shortcut_recording_until_ = 0;
+  void LoadShortcuts();
   CefRefPtr<BrowserClient> client_;
   std::unique_ptr<DownloadManager> downloads_;
   std::unique_ptr<PermissionManager> permissions_;

@@ -127,6 +127,16 @@ Backdrop MakeBackdrop(const Palette& palette, uint32_t workspace_rgb, float stre
   return {Mix(primary, base, t), Mix(secondary, base, t * 0.55f)};
 }
 
+D2D1_COLOR_F ColorFromRgbF(const orbit::Rgb& c, float alpha) {
+  return D2D1::ColorF(std::clamp(c.r, 0.f, 255.f) / 255.f, std::clamp(c.g, 0.f, 255.f) / 255.f,
+                      std::clamp(c.b, 0.f, 255.f) / 255.f, alpha);
+}
+
+uint32_t RgbToUint(const orbit::Rgb& c) {
+  auto byte = [](float v) { return static_cast<uint32_t>(std::lround(std::clamp(v, 0.f, 255.f))); };
+  return (byte(c.r) << 16) | (byte(c.g) << 8) | byte(c.b);
+}
+
 bool SystemPrefersDark() {
   DWORD value = 1;
   DWORD size = sizeof(value);

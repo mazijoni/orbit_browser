@@ -126,6 +126,49 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
   if (path == "/page") {
     body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) +
            "</title><body>test page</body>";
+  } else if (path == "/media") {
+    // Plays the test tone with MediaSession metadata (the media card's source).
+    body = "<!doctype html><title>media</title><audio id=a src=\"/tone.wav\" loop></audio><script>"
+           "navigator.mediaSession.metadata = new MediaMetadata({title: 'Orbit Tone', artist: 'Self Test'});"
+           "a.play().then(() => document.title = 'PLAYING');</script>";
+  } else if (path == "/links") {
+    // A big link at the top-left; synthetic (untrusted) clicks are recorded
+    // in the title and must never open a glance.
+    body = "<!doctype html><title>links</title><style>body{margin:0}a{display:block;width:400px;"
+           "height:200px;background:#ddd}</style><a id=l href=\"/page?t=Glanced\">glance me</a>"
+           "<script>l.addEventListener('click', e => { if (!e.isTrusted) { e.preventDefault();"
+           "document.title = 'SYNTH'; } });</script>";
+  } else if (path == "/feed") {
+    // An RSS feed for live folders: one item per id in "items".
+    body = "<?xml version=\"1.0\" encoding=\"utf-8\"?><rss version=\"2.0\"><channel>"
+           "<title>Orbit Test Feed</title><link>http://127.0.0.1/</link>";
+    const std::string items = QueryParam(target, "items");
+    size_t start = 0;
+    while (start < items.size()) {
+      size_t comma = items.find(',', start);
+      if (comma == std::string::npos) comma = items.size();
+      const std::string id = EscapeHtml(items.substr(start, comma - start));
+      body += "<item><title>Item " + id + "</title><link>http://127.0.0.1:" + std::to_string(port_) +
+              "/page?t=Item-" + id + "</link><guid>item-" + id +
+              "</guid><pubDate>Tue, 20 Oct 2026 10:00:00 GMT</pubDate></item>";
+      start = comma + 1;
+    }
+    body += "</channel></rss>";
+    type = "application/rss+xml";
+  } else if (path == "/gh/pulls") {
+    // github.com/pulls asked for JSON (pullsDashboardSurfaceContentRoute).
+    const std::string base = "http://127.0.0.1:" + std::to_string(port_);
+    body = "{\"payload\":{\"pullsDashboardSurfaceContentRoute\":{\"results\":["
+           "{\"repoNameWithOwner\":\"orbit/browser\",\"number\":7,\"title\":\"Add live folders\","
+           "\"author\":{\"displayLogin\":\"alice\"},\"permalink\":\"https://github.com/orbit/browser/pull/7\"},"
+           "{\"repoNameWithOwner\":\"orbit/site\",\"number\":3,\"title\":\"Docs\","
+           "\"author\":{\"displayLogin\":\"bob\"},\"permalink\":\"https://github.com/orbit/site/pull/3\"}]}}}";
+    (void)base;
+    type = "application/json";
+  } else if (path == "/gh/issues") {
+    body = "<!doctype html><ul><li><a data-testid=\"issue-listitem-title-link\" "
+           "href=\"/orbit/browser/issues/12\">Crash on start</a><a data-testid=\"author-filter-link\" "
+           "href=\"#\">carol</a></li></ul>";
   } else if (path == "/file.bin") {
     body.assign(kFileSize, 'x');
     type = "application/octet-stream";

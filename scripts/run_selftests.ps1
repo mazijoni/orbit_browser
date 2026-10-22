@@ -47,9 +47,11 @@ $results['isolation'] = Invoke-Suite 'isolation' (Join-Path $work 'isolation')
 $results['services'] = Invoke-Suite 'services' (Join-Path $work 'services')
 $results['memory'] = Invoke-Suite 'memory' (Join-Path $work 'memory')
 $results['security'] = Invoke-Suite 'security' (Join-Path $work 'security')
+$results['zen'] = Invoke-Suite 'zen' (Join-Path $work 'zen')
 $restoreDir = Join-Path $work 'restore'
 $results['restore-1'] = Invoke-Suite 'restore-1' $restoreDir
 $results['restore-2'] = Invoke-Suite 'restore-2' $restoreDir
+$results['restore-3'] = Invoke-Suite 'restore-3' $restoreDir
 
 $failed = @($results.GetEnumerator() | Where-Object { -not $_.Value }).Count
 Write-Host "`n$($results.Count - $failed)/$($results.Count) suites passed"

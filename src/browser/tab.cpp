@@ -5,6 +5,7 @@
 #include "browser/profile.h"
 #include "core/log.h"
 #include "core/strings.h"
+#include "core/url_fixup.h"
 #include "include/base/cef_callback.h"
 #include "include/cef_request_context.h"
 #include "include/wrapper/cef_closure_task.h"
@@ -62,6 +63,34 @@ Tab::Tab(Workspace* workspace, TabRecord record)
 
 Tab::~Tab() { DestroyHost(); }
 
+void Tab::SetPinnedUrl(const std::wstring& url) {
+  if (record_.pinned_url == url) return;
+  record_.pinned_url = url;
+  pinned_favicon_ = {};
+  if (!url.empty() && PinnedUrlMatches(record_.url, url)) pinned_favicon_ = favicon_;
+  MarkDirty();
+  NotifyChanged();
+}
+
+bool Tab::pin_changed() const {
+  return record_.pinned && !record_.pinned_url.empty() &&
+         !PinnedUrlMatches(record_.url, record_.pinned_url);
+}
+
+void Tab::ResetToPinned() {
+  if (!record_.pinned || record_.pinned_url.empty()) return;
+  record_.url = record_.pinned_url;
+  favicon_ = pinned_favicon_;
+  ++favicon_.generation;
+  MarkDirty();
+  if (load_state_ == LoadState::kLive || load_state_ == LoadState::kCreating) {
+    // CEF cannot rewrite session history; a new browser starts with one entry.
+    recreate_after_close_ = true;
+    Unload(/*mark_discarded=*/false);
+  }
+  NotifyChanged();
+}
+
 Profile* Tab::profile() const { return workspace_ ? workspace_->profile() : nullptr; }
 
 void Tab::MarkDirty() {
@@ -69,7 +98,15 @@ void Tab::MarkDirty() {
   Application::Get()->ScheduleSave();
 }
 
+void Tab::SetCustomTitle(const std::wstring& title) {
+  if (record_.custom_title == title) return;
+  record_.custom_title = title;
+  MarkDirty();
+  NotifyChanged();
+}
+
 std::wstring Tab::DisplayTitle() const {
+  if (!record_.custom_title.empty()) return record_.custom_title;
   if (!record_.title.empty()) return record_.title;
   if (record_.url.empty() || record_.url == Application::kNewTabUrl) return L"New Tab";
   return record_.url;
@@ -148,7 +185,8 @@ void Tab::EnsureBrowser(BrowserWindow* window) {
   info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
   CefBrowserSettings settings;
   const std::wstring url = record_.url.empty() ? Application::kNewTabUrl : record_.url;
-  if (!CefBrowserHost::CreateBrowser(info, Application::Get()->client(), url, settings, nullptr,
+  if (!CefBrowserHost::CreateBrowser(info, Application::Get()->client(), url, settings,
+                                     Application::Get()->RendererInfo(),
                                      profile()->request_context())) {
     ORBIT_LOG_ERROR("CreateBrowser failed for tab %lld", record_.id);
     return;
@@ -170,7 +208,11 @@ void Tab::PrepareForPopup(BrowserWindow* window, CefWindowInfo& info) {
 
 void Tab::Reparent(BrowserWindow* window) {
   if (window_ == window) return;
+  BrowserWindow* old = window_;
   window_ = window;
+  // An Essential can be shown by any window of its profile; the window that
+  // loses it falls back to its own space.
+  if (old && old != window) old->OnTabMovedAway(this);
   if (host_) {
     ::ShowWindow(host_, SW_HIDE);
     ::SetParent(host_, window->hwnd());
@@ -284,6 +326,15 @@ void Tab::Unload(bool mark_discarded) {
 void Tab::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   browser_ = browser;
   load_state_ = LoadState::kLive;
+  // Creation is asynchronous: the host may have been resized since (a split
+  // pane, a reveal), while it had no child to pass the size to.
+  if (host_) {
+    if (HWND child = browser->GetHost()->GetWindowHandle()) {
+      RECT rc;
+      ::GetClientRect(host_, &rc);
+      ::SetWindowPos(child, nullptr, 0, 0, rc.right, rc.bottom, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+  }
   if (pending_unload_) {
     pending_unload_ = false;
     if (close_requested_) {
@@ -321,7 +372,16 @@ bool Tab::OnDoClose() {
 }
 
 void Tab::OnBeforeClose() {
+  if (recreate_after_close_) {
+    recreate_after_close_ = false;
+    // Recreated by the window outside this CEF callback.
+    if (BrowserWindow* w = workspace_ ? workspace_->window() : nullptr) {
+      ::PostMessageW(w->hwnd(), BrowserWindow::kRecreateTabMessage, 0,
+                     reinterpret_cast<LPARAM>(this));
+    }
+  }
   browser_ = nullptr;
+  media_frames_.clear();  // nothing plays without a browser
   load_state_ = LoadState::kUnloaded;
   unloading_ = false;
   loading_ = false;
@@ -333,6 +393,7 @@ void Tab::OnBeforeClose() {
 }
 
 void Tab::OnAddressChange(const std::wstring& url) {
+  if (url != Application::kNewTabUrl) empty_placeholder_ = false;
   if (record_.url != url) {
     record_.url = url;
     MarkDirty();
@@ -372,6 +433,14 @@ void Tab::OnLoadingProgress(double progress) {
 
 void Tab::OnFaviconUrl(const std::wstring& url) {
   if (url == record_.favicon_url && !favicon_.bgra.empty()) return;  // already have it
+  if (url != record_.favicon_url && !favicon_.bgra.empty()) {
+    // A different icon (or none): drop the previous page's image so a failed
+    // download (e.g. a missing /favicon.ico) shows the default icon instead.
+    favicon_.bgra.clear();
+    favicon_.width = favicon_.height = 0;
+    ++favicon_.generation;
+    NotifyChanged();
+  }
   record_.favicon_url = url;
   MarkDirty();
   if (browser_ && !url.empty()) {
@@ -385,6 +454,7 @@ void Tab::OnFaviconImage(int width, int height, std::vector<uint8_t> bgra) {
   favicon_.height = height;
   favicon_.bgra = std::move(bgra);
   ++favicon_.generation;
+  if (record_.pinned && !pin_changed()) pinned_favicon_ = favicon_;
   NotifyChanged();
 }
 
@@ -444,6 +514,32 @@ void Tab::QueryMediaPlayback() {
       frame->SendProcessMessage(PID_RENDERER, CefProcessMessage::Create("orbit.media-query"));
     }
   }
+}
+
+void Tab::OnMediaState(const std::string& frame_id, const MediaState& state) {
+  if (state.state == MediaState::State::kNone) {
+    media_frames_.erase(frame_id);
+  } else {
+    MediaState s = state;
+    const auto it = media_frames_.find(frame_id);
+    const bool was_playing = it != media_frames_.end() && it->second.state == MediaState::State::kPlaying;
+    s.started_at = s.state == MediaState::State::kPlaying && !was_playing
+                       ? s.updated_at
+                       : (it != media_frames_.end() ? it->second.started_at : s.updated_at);
+    media_frames_[frame_id] = s;
+  }
+  NotifyChanged();
+}
+
+Tab::MediaState Tab::media() const {
+  MediaState best;
+  for (const auto& [id, s] : media_frames_) {
+    const bool better = best.state == MediaState::State::kNone ||
+                        (s.state == MediaState::State::kPlaying && best.state != MediaState::State::kPlaying) ||
+                        (s.state == best.state && s.started_at > best.started_at);
+    if (better) best = s;
+  }
+  return best;
 }
 
 void Tab::OnMediaReply(bool playing) {

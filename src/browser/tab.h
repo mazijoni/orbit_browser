@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,20 @@ class Tab {
   const std::wstring& url() const { return record_.url; }
   std::wstring DisplayTitle() const;
   bool pinned() const { return record_.pinned; }
+  // Zen's pinned tab state: the page a pinned tab belongs to.
+  const std::wstring& pinned_url() const { return record_.pinned_url; }
+  void SetPinnedUrl(const std::wstring& url);
+  // True when a pinned tab has navigated away from its pinned page.
+  bool pin_changed() const;
+  // The favicon of the pinned page, captured while the tab showed it.
+  const FaviconPixels& pinned_favicon() const { return pinned_favicon_; }
+  // Back to the pinned page with a fresh history (Zen #resetTabToStoredState):
+  // a live browser is closed and recreated at the pinned URL.
+  void ResetToPinned();
+  // Zen's "Change Label…": a user label shown instead of the page title;
+  // empty restores the page title.
+  const std::wstring& custom_title() const { return record_.custom_title; }
+  void SetCustomTitle(const std::wstring& title);
   bool is_protected() const { return record_.is_protected; }
 
   // Live state (reflects real browser events).
@@ -70,6 +85,16 @@ class Tab {
   bool media_capture() const { return media_capture_; }
   const FaviconPixels& favicon() const { return favicon_; }
   int64_t last_active_ms() const { return record_.last_active; }
+  // Firefox's tab.owner: the tab this one was opened from in the foreground.
+  // Cleared when the user switches away from this tab (non-owning; the window
+  // clears it when the owner goes away).
+  Tab* owner() const { return owner_; }
+  // Zen's hidden empty tab (zen-empty-tab): the new-tab page that stands in
+  // for an empty space. Not listed in the sidebar; dropped once another tab
+  // opens, and an ordinary tab once it navigates somewhere.
+  bool empty_placeholder() const { return empty_placeholder_; }
+  void set_empty_placeholder(bool value) { empty_placeholder_ = value; }
+  void set_owner(Tab* owner) { owner_ = owner; }
   void TouchActive();
 
   CefRefPtr<CefBrowser> browser() const { return browser_; }
@@ -100,6 +125,9 @@ class Tab {
   // when Chromium confirms the close (DoClose).
   void RequestClose();
   bool close_requested() const { return close_requested_; }
+  // Marks the tab as part of a multi-tab close so it is reopened together.
+  void set_close_batch(int64_t batch) { close_batch_ = batch; }
+  int64_t close_batch() const { return close_batch_; }
   // Frees the browser and renderer but keeps the tab (discard / window close).
   // |mark_discarded| shows the tab as discarded in the UI.
   void Unload(bool mark_discarded);
@@ -131,6 +159,22 @@ class Tab {
   bool media_reported_playing() const { return media_reported_playing_; }
   void ResetMediaQuery() { media_query_sent_at_ = 0; media_reported_playing_ = false; }
 
+  // Media card (ZenMediaController): what the tab's frames report playing.
+  struct MediaState {
+    enum class State { kNone, kPlaying, kPaused };
+    State state = State::kNone;
+    std::wstring title;
+    std::wstring artist;
+    double time = 0.0;
+    double duration = 0.0;
+    ULONGLONG updated_at = 0;   // GetTickCount64 of the report
+    ULONGLONG started_at = 0;   // when it last started playing
+  };
+  void OnMediaState(const std::string& frame_id, const MediaState& state);
+  // The frame playing (else paused) most recently.
+  MediaState media() const;
+  void ForgetMedia() { media_frames_.clear(); }
+
   static Tab* FromHost(HWND host);
 
  private:
@@ -153,6 +197,11 @@ class Tab {
   bool unloading_ = false;
   bool discarded_ = false;
   bool close_requested_ = false;
+  int64_t close_batch_ = 0;
+  Tab* owner_ = nullptr;
+  bool empty_placeholder_ = false;
+  FaviconPixels pinned_favicon_;
+  bool recreate_after_close_ = false;
 
   bool loading_ = false;
   double progress_ = 0.0;
@@ -163,6 +212,7 @@ class Tab {
   bool muted_ = false;
   int last_error_ = 0;
   ULONGLONG media_query_sent_at_ = 0;
+  std::map<std::string, MediaState> media_frames_;
   bool media_reported_playing_ = false;
   SecurityLevel security_ = SecurityLevel::kNone;
   std::wstring title_live_;

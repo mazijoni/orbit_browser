@@ -13,6 +13,317 @@
 #include <algorithm>
 
 namespace orbit {
+namespace {
+
+// ZenGlanceChild: a capturing click listener installed before any page
+// script runs. The native callback reaches the listener only through the
+// installer's closure, never through a global, and only trusted (real
+// user) Alt+left clicks on http(s) links without other modifiers count;
+// clicks that moved more than a few pixels since mousedown are selections.
+constexpr char kGlanceListener[] = R"js((function (send, trigger) {
+  let downX = null, downY = null;
+  addEventListener('mousedown', (e) => { downX = e.clientX; downY = e.clientY; }, true);
+  addEventListener('click', (e) => {
+    const moved = downX !== null && (Math.abs(e.clientX - downX) > 3 || Math.abs(e.clientY - downY) > 3);
+    downX = downY = null;
+    // zen.glance.activation-method: exactly the trigger modifier.
+    const mods = {alt: e.altKey, ctrl: e.ctrlKey, shift: e.shiftKey};
+    if (!e.isTrusted || moved || e.button !== 0 || e.metaKey || e.defaultPrevented ||
+        !mods[trigger] || Object.keys(mods).some((k) => k !== trigger && mods[k])) return;
+    let link = null;
+    for (const node of e.composedPath()) {
+      if (node && node.localName === 'a' && node.href) { link = node; break; }
+    }
+    if (!link) return;
+    const href = String(link.href);
+    if (!/^https?:/i.test(href)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    // Where the link is (the glance grows out of it).
+    const r = link.getBoundingClientRect();
+    send(href, r.left, r.top, r.width, r.height);
+  }, true);
+}))js";
+
+// ZenWindowDragChild: a left press in the top 5% of the top-level page, not
+// over anything the page wants to click, select, drag or scroll, starts a
+// window move once it has moved 4 px. Trusted events only.
+constexpr char kWindowDragListener[] = R"js((function (send) {
+  const interactive = new Set(['a', 'button', 'input', 'select', 'textarea', 'label', 'summary', 'details',
+      'option', 'audio', 'video', 'canvas', 'iframe', 'embed', 'object', 'img', 'svg']);
+  const roles = new Set(['button', 'checkbox', 'combobox', 'grid', 'link', 'listbox', 'menu', 'menubar',
+      'menuitem', 'option', 'radio', 'scrollbar', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab',
+      'textbox', 'toolbar', 'tree', 'treegrid']);
+  const cursors = new Set(['pointer', 'text', 'grab', 'grabbing', 'move', 'crosshair', 'vertical-text',
+      'col-resize', 'row-resize', 'ew-resize', 'ns-resize']);
+  const overContent = (e) => {
+    if (e.clientX >= document.documentElement.clientWidth) return true;  // the scrollbar
+    for (let node = e.target; node && node.nodeType === 1; node = node.parentElement || node.getRootNode().host) {
+      if (interactive.has(node.localName) || node.isContentEditable || node.draggable) return true;
+      if (roles.has(node.getAttribute('role'))) return true;
+      if (node.tabIndex >= 0 && node !== document.body) return true;
+    }
+    if (e.target && e.target.nodeType === 1 && cursors.has(getComputedStyle(e.target).cursor)) return true;
+    const range = document.caretRangeFromPoint && document.caretRangeFromPoint(e.clientX, e.clientY);
+    if (range && range.startContainer.nodeType === 3) {
+      const r = document.createRange();
+      r.selectNodeContents(range.startContainer);
+      for (const b of r.getClientRects()) {
+        if (e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom &&
+            getComputedStyle(range.startContainer.parentElement).userSelect !== 'none') return true;
+      }
+    }
+    return false;
+  };
+  let start = null, sent = false;
+  addEventListener('mousedown', (e) => {
+    start = null; sent = false;
+    if (!e.isTrusted || e.button !== 0 || e.buttons !== 1 || e.detail !== 1 || e.defaultPrevented ||
+        e.ctrlKey || e.altKey || e.shiftKey || e.metaKey || document.fullscreenElement ||
+        document.pointerLockElement || e.clientY > innerHeight * 0.05 || overContent(e)) return;
+    start = {x: e.screenX, y: e.screenY};
+  }, true);
+  addEventListener('mousemove', (e) => {
+    if (!start || !e.isTrusted) return;
+    if (!(e.buttons & 1)) { start = null; return; }
+    const d = Math.hypot(e.screenX - start.x, e.screenY - start.y) * devicePixelRatio;
+    if (d < 4) return;
+    if (!sent) getSelection().removeAllRanges();
+    sent = true;
+    e.preventDefault();
+    send(d);  // the browser starts the move (50 px for a maximized window)
+  }, true);
+  addEventListener('mouseup', () => { start = null; }, true);
+  addEventListener('dragstart', () => { start = null; }, true);
+}))js";
+
+// ZenMediaController's card needs to know what plays: on media events (and
+// every second while something plays) the frame reports one JSON object —
+// playing / paused, the MediaSession title and artist (or the page's), and
+// the position. Audible playback only (not muted, volume above 0).
+constexpr char kMediaListener[] = R"js((function (send) {
+  let timer = 0, last = '';
+  const report = () => {
+    timer = 0;
+    const media = Array.from(document.querySelectorAll('video,audio'));
+    const audible = (m) => !m.paused && !m.ended && !m.muted && m.volume > 0;
+    const playing = media.find(audible);
+    const paused = !playing && media.find((m) => m.paused && !m.ended && m.currentTime > 0 && !m.muted);
+    const el = playing || paused;
+    const meta = navigator.mediaSession && navigator.mediaSession.metadata;
+    const state = el ? {state: playing ? 'playing' : 'paused',
+                        title: String((meta && meta.title) || document.title || location.hostname).slice(0, 200),
+                        artist: String((meta && meta.artist) || location.hostname).slice(0, 200),
+                        time: el.currentTime || 0, duration: isFinite(el.duration) ? el.duration : 0}
+                     : {state: 'none'};
+    const s = JSON.stringify(state);
+    if (s === last) return;
+    last = s;
+    send(s);
+  };
+  const schedule = () => { if (!timer) timer = setTimeout(report, 200); };
+  for (const t of ['play', 'playing', 'pause', 'ended', 'emptied', 'volumechange', 'seeked'])
+    addEventListener(t, schedule, true);
+  setInterval(() => { if (last.indexOf('"playing"') >= 0) report(); }, 1000);
+}))js";
+
+class MediaStateSender : public CefV8Handler {
+ public:
+  bool Execute(const CefString&, CefRefPtr<CefV8Value>, const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>&, CefString&) override {
+    if (arguments.size() != 1 || !arguments[0]->IsString()) return true;
+    const std::string json = arguments[0]->GetStringValue().ToString();
+    if (json.size() > 2048) return true;
+    CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+    CefRefPtr<CefFrame> frame = context ? context->GetFrame() : nullptr;
+    if (!frame) return true;
+    CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create(kMediaStateMessage);
+    message->GetArgumentList()->SetString(0, json);
+    frame->SendProcessMessage(PID_BROWSER, message);
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(MediaStateSender);
+};
+
+class WindowDragSender : public CefV8Handler {
+ public:
+  bool Execute(const CefString&, CefRefPtr<CefV8Value>, const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>&, CefString&) override {
+    if (arguments.size() != 1 || !arguments[0]->IsDouble()) return true;
+    CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+    CefRefPtr<CefFrame> frame = context ? context->GetFrame() : nullptr;
+    if (!frame || !frame->IsMain()) return true;
+    CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create(kWindowDragMessage);
+    message->GetArgumentList()->SetDouble(0, arguments[0]->GetDoubleValue());
+    frame->SendProcessMessage(PID_BROWSER, message);
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(WindowDragSender);
+};
+
+// ZenZapOverlayChild / ZenSelectorComponent: while the browser has a page
+// in zap or focus mode, the element under the pointer is outlined and a
+// trusted click picks it (reported as a CSS selector); Escape stops.
+constexpr char kBoostPicker[] = R"js((function (send) {
+  let mode = '', box = null, hover = null;
+  const ident = /^[A-Za-z][A-Za-z0-9_-]*$/;
+  const selectorFor = (el) => {
+    const parts = [];
+    for (let n = el; n && n.nodeType === 1 && n !== document.documentElement; n = n.parentElement) {
+      if (n.id && ident.test(n.id)) { parts.unshift('#' + n.id); break; }
+      if (n === document.body) { parts.unshift('body'); break; }
+      let i = 1;
+      for (let s = n.previousElementSibling; s; s = s.previousElementSibling) if (s.localName === n.localName) i++;
+      parts.unshift(n.localName + ':nth-of-type(' + i + ')');
+    }
+    return parts.join(' > ');
+  };
+  const outline = (el) => {
+    if (!box) {
+      box = document.createElement('div');
+      box.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;border-radius:4px;' +
+        'outline:2px solid #ff5c5c;background:rgba(255,92,92,.15);transition:all .08s';
+    }
+    const r = el.getBoundingClientRect();
+    Object.assign(box.style, {left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px'});
+    if (!box.isConnected) document.documentElement.append(box);
+  };
+  addEventListener('mousemove', (e) => {
+    if (!mode || !e.isTrusted || e.target === box) return;
+    hover = e.target;
+    outline(hover);
+  }, true);
+  const swallow = (e) => { if (mode && e.isTrusted) { e.preventDefault(); e.stopImmediatePropagation(); } };
+  addEventListener('mousedown', swallow, true);
+  addEventListener('mouseup', swallow, true);
+  addEventListener('click', (e) => {
+    if (!mode || !e.isTrusted || e.button !== 0) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const target = e.target === box ? hover : e.target;
+    if (target && target !== document.documentElement && target !== document.body) send(mode, selectorFor(target));
+  }, true);
+  addEventListener('keydown', (e) => { if (mode && e.isTrusted && e.key === 'Escape') { send('off', ''); } }, true);
+  return (next) => { mode = next === 'zap' || next === 'focus' ? next : ''; if (!mode && box) box.remove(); };
+}))js";
+
+class BoostPickSender : public CefV8Handler {
+ public:
+  bool Execute(const CefString&, CefRefPtr<CefV8Value>, const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>&, CefString&) override {
+    if (arguments.size() != 2 || !arguments[0]->IsString() || !arguments[1]->IsString()) return true;
+    const std::wstring mode = arguments[0]->GetStringValue().ToWString();
+    const std::wstring selector = arguments[1]->GetStringValue().ToWString();
+    if (selector.size() > 500) return true;
+    CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+    CefRefPtr<CefFrame> frame = context ? context->GetFrame() : nullptr;
+    if (!frame || !frame->IsMain()) return true;
+    CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create(kBoostPickMessage);
+    message->GetArgumentList()->SetString(0, mode);
+    message->GetArgumentList()->SetString(1, selector);
+    frame->SendProcessMessage(PID_BROWSER, message);
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(BoostPickSender);
+};
+
+class GlanceSender : public CefV8Handler {
+ public:
+  bool Execute(const CefString&, CefRefPtr<CefV8Value>, const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>&, CefString&) override {
+    if (arguments.empty() || !arguments[0]->IsString()) return true;
+    const std::wstring url = arguments[0]->GetStringValue().ToWString();
+    if (url.size() > 8192) return true;
+    CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+    CefRefPtr<CefFrame> frame = context ? context->GetFrame() : nullptr;
+    if (!frame) return true;
+    CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create(kGlanceOpenMessage);
+    message->GetArgumentList()->SetString(0, url);
+    // The link's viewport rect, for the opening animation (top-level page
+    // only: a frame's coordinates are not the page's).
+    if (frame->IsMain() && arguments.size() == 5) {
+      for (size_t i = 1; i < 5; ++i) {
+        if (!arguments[i]->IsDouble() && !arguments[i]->IsInt()) return true;
+        message->GetArgumentList()->SetDouble(i, arguments[i]->GetDoubleValue());
+      }
+    }
+    frame->SendProcessMessage(PID_BROWSER, message);
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(GlanceSender);
+};
+
+}  // namespace
+
+void OrbitApp::OnBrowserCreated(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefDictionaryValue> extra_info) {
+  std::string trigger = extra_info && extra_info->HasKey("glance")
+                            ? extra_info->GetString("glance").ToString()
+                            : std::string();
+  if (trigger != "alt" && trigger != "ctrl" && trigger != "shift") trigger.clear();
+  glance_trigger_[browser->GetIdentifier()] = trigger;
+  window_drag_[browser->GetIdentifier()] =
+      extra_info && extra_info->HasKey("drag") && extra_info->GetBool("drag");
+}
+
+void OrbitApp::OnBrowserDestroyed(CefRefPtr<CefBrowser> browser) {
+  pickers_.erase(browser->GetIdentifier());
+  glance_trigger_.erase(browser->GetIdentifier());
+  window_drag_.erase(browser->GetIdentifier());
+}
+
+void OrbitApp::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                                CefRefPtr<CefV8Context> context) {
+  // Pages only (the browser's own orbit:// pages play nothing).
+  if (frame->GetURL().ToString().rfind("orbit:", 0) != 0 && frame->IsMain()) {
+    // Boosts' picker, controlled from the browser (kBoostPickModeMessage).
+    CefRefPtr<CefV8Value> installer;
+    CefRefPtr<CefV8Exception> exception;
+    if (context->Eval(kBoostPicker, CefString(), 0, installer, exception) && installer && installer->IsFunction()) {
+      CefV8ValueList args{CefV8Value::CreateFunction("send", new BoostPickSender())};
+      CefRefPtr<CefV8Value> control = installer->ExecuteFunction(nullptr, args);
+      if (control && control->IsFunction()) pickers_[browser->GetIdentifier()] = {context, control};
+    }
+  }
+  if (frame->GetURL().ToString().rfind("orbit:", 0) != 0) {
+    CefRefPtr<CefV8Value> installer;
+    CefRefPtr<CefV8Exception> exception;
+    if (context->Eval(kMediaListener, CefString(), 0, installer, exception) && installer &&
+        installer->IsFunction()) {
+      CefV8ValueList args{CefV8Value::CreateFunction("send", new MediaStateSender())};
+      installer->ExecuteFunction(nullptr, args);
+    }
+  }
+  if (const auto drag = window_drag_.find(browser->GetIdentifier());
+      drag != window_drag_.end() && drag->second && frame->IsMain()) {
+    CefRefPtr<CefV8Value> installer;
+    CefRefPtr<CefV8Exception> exception;
+    if (context->Eval(kWindowDragListener, CefString(), 0, installer, exception) && installer &&
+        installer->IsFunction()) {
+      CefV8ValueList args{CefV8Value::CreateFunction("send", new WindowDragSender())};
+      installer->ExecuteFunction(nullptr, args);
+    }
+  }
+  const auto it = glance_trigger_.find(browser->GetIdentifier());
+  if (it == glance_trigger_.end() || it->second.empty()) return;  // glance off
+  CefRefPtr<CefV8Value> installer;
+  CefRefPtr<CefV8Exception> exception;
+  if (!context->Eval(kGlanceListener, CefString(), 0, installer, exception) || !installer ||
+      !installer->IsFunction()) {
+    return;
+  }
+  CefV8ValueList args{CefV8Value::CreateFunction("send", new GlanceSender()),
+                      CefV8Value::CreateString(it->second)};
+  installer->ExecuteFunction(nullptr, args);
+}
 
 void OrbitApp::OnRegisterCustomSchemes(CefRawPtr<CefSchemeRegistrar> registrar) {
   RegisterInternalScheme(registrar);
@@ -33,6 +344,17 @@ bool OrbitApp::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
   // Renderer process: report whether any audible <audio>/<video> element is
   // playing in this frame. Only the browser process may ask. Web Audio API
   // output is not visible to this check (documented limitation).
+  if (source_process == PID_BROWSER && message->GetName() == kBoostPickModeMessage) {
+    const auto it = pickers_.find(browser->GetIdentifier());
+    CefRefPtr<CefListValue> args = message->GetArgumentList();
+    if (it != pickers_.end() && args->GetSize() == 1 && args->GetType(0) == VTYPE_STRING &&
+        it->second.first->IsValid() && it->second.first->Enter()) {
+      CefV8ValueList call{CefV8Value::CreateString(args->GetString(0))};
+      it->second.second->ExecuteFunction(nullptr, call);
+      it->second.first->Exit();
+    }
+    return true;
+  }
   if (source_process != PID_BROWSER || message->GetName() != kMediaQueryMessage) return false;
   bool playing = false;
   CefRefPtr<CefV8Context> context = frame->GetV8Context();

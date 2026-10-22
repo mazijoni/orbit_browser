@@ -21,6 +21,11 @@ InternalResponse BookmarksPage(const InternalRequest& req);
 InternalResponse DownloadsPage(const InternalRequest& req);
 InternalResponse SettingsPage(const InternalRequest& req);
 InternalResponse DiagnosticsPage(const InternalRequest& req);
+InternalResponse LibraryPage(const InternalRequest& req);
+InternalResponse SiteDataPage(const InternalRequest& req);
+InternalResponse WelcomePage(const InternalRequest& req);
+InternalResponse ThemePage(const InternalRequest& req);
+InternalResponse BoostPage(const InternalRequest& req);
 
 // JSON APIs under orbit://<page>/api/<name>. The caller has already verified
 // req.same_page; mutating endpoints check req.trusted_action themselves.
@@ -30,5 +35,10 @@ InternalResponse DownloadsApi(const InternalRequest& req, Profile* profile);
 InternalResponse SettingsApi(const InternalRequest& req, Profile* profile);
 InternalResponse NewTabApi(const InternalRequest& req, Profile* profile);
 InternalResponse DiagnosticsApi(const InternalRequest& req, Profile* profile);
+InternalResponse LibraryApi(const InternalRequest& req, Profile* profile);
+InternalResponse SiteDataApi(const InternalRequest& req, Profile* profile);
+InternalResponse WelcomeApi(const InternalRequest& req, Profile* profile);
+InternalResponse ThemeApi(const InternalRequest& req, Profile* profile);
+InternalResponse BoostApi(const InternalRequest& req, Profile* profile);
 
 }  // namespace orbit

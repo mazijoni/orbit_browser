@@ -82,4 +82,10 @@ void DrawTextIn(ID2D1RenderTarget* rt, IDWriteTextFormat* format, std::wstring_v
                D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
+bool AnimationsEnabled() {
+  BOOL enabled = TRUE;
+  if (!::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0)) return true;
+  return enabled != FALSE;
+}
+
 }  // namespace orbit::ui

@@ -25,6 +25,10 @@ struct WorkspaceRecord {
   uint32_t color = 0;
   std::wstring icon;
   int position = 0;
+  int kind = 0;  // kKindSpace or kKindEssentials
+  std::wstring theme;  // gradient picker (SerializeSpaceTheme); empty: the colour alone
+  static constexpr int kKindSpace = 0;
+  static constexpr int kKindEssentials = 1;
 };
 
 struct TabRecord {
@@ -36,6 +40,10 @@ struct TabRecord {
   bool pinned = false;
   bool is_protected = false;
   int64_t group_id = 0;  // 0 = ungrouped
+  std::wstring pinned_url;  // pinned tabs: the page Reset returns to
+  std::wstring custom_title;  // user label shown instead of the page title
+  std::wstring live_item;     // live folders: the "<folder>:<item>" it shows
+  std::wstring sublabel;      // live folders: the line under the title (author)
   int position = 0;
   int64_t last_active = 0;
 };
@@ -46,6 +54,20 @@ struct TabGroupRecord {
   std::wstring name;
   uint32_t color = 0;
   bool collapsed = false;
+  int64_t parent_id = 0;  // the folder it is in (0: top level)
+  std::wstring icon;      // an emoji, or empty for the folder glyph
+};
+
+struct LiveFolderRecord {
+  int64_t group_id = 0;
+  std::wstring state;      // SerializeLiveState
+  std::wstring dismissed;  // composite item ids, one per line
+};
+
+struct SplitViewRecord {
+  int64_t id = 0;
+  int64_t workspace_id = 0;
+  std::wstring layout;  // SerializeSplit text; leaves are tab ids
 };
 
 struct WindowRecord {
@@ -63,6 +85,7 @@ struct ClosedTabRecord {
   int64_t workspace_id = 0;
   std::wstring url;
   std::wstring title;
+  int64_t batch_id = 0;  // non-zero: closed together with the other tabs of this batch
 };
 
 struct HistoryRecord {
@@ -120,7 +143,8 @@ class Store {
   // Workspaces.
   std::vector<WorkspaceRecord> LoadWorkspaces(int64_t profile_id);
   std::optional<WorkspaceRecord> CreateWorkspace(int64_t profile_id, const std::wstring& name,
-                                                 uint32_t color, const std::wstring& icon);
+                                                 uint32_t color, const std::wstring& icon,
+                                                 int kind = WorkspaceRecord::kKindSpace);
   bool UpdateWorkspace(const WorkspaceRecord& workspace);
   bool DeleteWorkspace(int64_t id);
   bool SetWorkspaceOrder(const std::vector<int64_t>& ids);
@@ -139,9 +163,29 @@ class Store {
   bool UpdateTabGroup(const TabGroupRecord& group);
   bool DeleteTabGroup(int64_t id);
 
+  // Boosts: the stored text per site (empty when none).
+  std::wstring LoadBoost(int64_t profile_id, const std::wstring& domain);
+  bool SaveBoost(int64_t profile_id, const std::wstring& domain, const std::wstring& data);
+  bool DeleteBoost(int64_t profile_id, const std::wstring& domain);
+  std::vector<std::wstring> BoostedDomains(int64_t profile_id);
+
+  // Live folders (all of them; they are few).
+  std::vector<LiveFolderRecord> LoadLiveFolders();
+  bool SaveLiveFolder(const LiveFolderRecord& folder);  // insert or replace
+  bool DeleteLiveFolder(int64_t group_id);
+
+  // Split views of a workspace.
+  std::vector<SplitViewRecord> LoadSplitViews(int64_t workspace_id);
+  int64_t InsertSplitView(const SplitViewRecord& split);
+  bool UpdateSplitView(const SplitViewRecord& split);
+  bool DeleteSplitView(int64_t id);
+
   // Recently closed tabs (bounded per profile).
   bool PushClosedTab(const ClosedTabRecord& tab);
   std::optional<ClosedTabRecord> PopClosedTab(int64_t profile_id);
+  // Removes and returns the most recently closed tab, together with every tab
+  // closed in the same batch, in the order they were closed.
+  std::vector<ClosedTabRecord> PopClosedTabBatch(int64_t profile_id);
 
   // Window session state; SaveWindows replaces the stored set atomically.
   std::vector<WindowRecord> LoadWindows();
@@ -156,6 +200,11 @@ class Store {
   // |before| (unix ms, 0 = now) pages through results.
   std::vector<HistoryRecord> QueryHistory(int64_t profile_id, const std::wstring& query,
                                           int64_t before, int limit);
+  // The address bar's history rows: one per URL, best first by a Firefox-like
+  // frecency (each visit weighs 100 / 70 / 50 / 30 / 10 by age: 4, 14, 31,
+  // 90 days, older), newest on ties. The title is the latest visit's.
+  std::vector<HistoryRecord> QueryHistoryFrecent(int64_t profile_id, const std::wstring& query,
+                                                 int64_t now_ms, int limit);
   bool DeleteVisit(int64_t profile_id, int64_t id);
   // Deletes visits with from <= visit_time < to (to == 0 means "until now").
   int DeleteHistoryRange(int64_t profile_id, int64_t from, int64_t to);
@@ -187,6 +236,7 @@ class Store {
   // Preferences. scope = kGlobalScope or a profile id.
   std::optional<std::wstring> GetPref(int64_t scope, const std::wstring& key);
   bool SetPref(int64_t scope, const std::wstring& key, const std::wstring& value);
+  bool DeletePref(int64_t scope, const std::wstring& key);
 
  private:
   Database& db_;

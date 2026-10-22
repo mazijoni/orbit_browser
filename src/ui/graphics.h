@@ -53,4 +53,9 @@ inline bool Contains(const D2D1_RECT_F& r, float x, float y) {
   return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
 
+// Windows' "Animation effects" setting (SPI_GETCLIENTAREAANIMATION); when
+// it is off, chrome animations jump to their end state.
+bool AnimationsEnabled();
+inline uint32_t AnimMs(uint32_t ms) { return AnimationsEnabled() ? ms : 0; }
+
 }  // namespace orbit::ui

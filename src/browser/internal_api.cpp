@@ -3,10 +3,12 @@
 // whose request context served the request.
 
 #include <windows.h>
+#include <shellapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <functional>
 #include <map>
 
 #include "app/application.h"
@@ -17,6 +19,11 @@
 #include "browser/profile.h"
 #include "core/bookmark_html.h"
 #include "core/process_metrics.h"
+#include "core/shortcuts.h"
+#include "core/space_routing.h"
+#include "core/space_theme.h"
+#include "core/boosts.h"
+#include "browser/boost_apply.h"
 #include "core/strings.h"
 #include "browser/tab.h"
 #include "include/base/cef_callback.h"
@@ -416,15 +423,85 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
     }
     d->SetList("presets", presets);
     d->SetBool("compact", store.GetPref(Store::kGlobalScope, L"sidebar_compact") == L"1");
+    d->SetBool("singleToolbar", store.GetPref(Store::kGlobalScope, L"single_toolbar").value_or(L"1") != L"0");
     d->SetBool("hidden", store.GetPref(Store::kGlobalScope, L"sidebar_hidden") == L"1");
+    d->SetBool("selectRecent",
+               store.GetPref(Store::kGlobalScope, L"select_recent_on_close").value_or(L"1") == L"1");
+    d->SetString("pinnedClose", store.GetPref(Store::kGlobalScope, L"pinned_close_behavior")
+                                    .value_or(L"reset-unload-switch"));
+    d->SetBool("restorePinned",
+               store.GetPref(Store::kGlobalScope, L"restore_pinned_to_pinned_url") == L"1");
+    d->SetBool("closeOnBack",
+               store.GetPref(Store::kGlobalScope, L"close_on_back_no_history").value_or(L"1") == L"1");
     d->SetString("themeStrength",
                  store.GetPref(Store::kGlobalScope, L"theme_strength").value_or(L"0.45"));
     d->SetString("sleep", store.GetPref(Store::kGlobalScope, L"sleep_minutes").value_or(L"0"));
+    auto pref_on = [&](const wchar_t* key, bool fallback) {
+      const auto v = store.GetPref(Store::kGlobalScope, key);
+      return v ? *v == L"1" : fallback;
+    };
+    d->SetBool("newtabButton", pref_on(L"newtab_button", true));
+    d->SetBool("newtabTop", pref_on(L"newtab_button_top", true));
+    d->SetBool("ctrlTabSkipPending", pref_on(L"ctrl_tab_skip_pending", false));
+    d->SetBool("greyOut", pref_on(L"grey_out_inactive", true));
+    d->SetBool("dragFromContent", pref_on(L"drag_window_from_content", true));
+    d->SetBool("quickActions", pref_on(L"quick_actions", true));
+    d->SetBool("tabsRight", pref_on(L"tabs_right", false));
+    d->SetBool("compactFlash", pref_on(L"compact_flash", false));  // zen.view.compact.toolbar-flash-popup
+    d->SetBool("searchSuggestions", pref_on(L"search_suggestions", false));  // browser.search.suggest.enabled
+    d->SetBool("ctrlTabWithin", pref_on(L"ctrl_tab_ignore_essentials", false));  // zen.tabs.ctrl-tab.ignore-essential-tabs
+    d->SetBool("continueLeftOff", pref_on(L"continue_where_left_off", false));  // zen.workspaces.continue-where-left-off
+    d->SetBool("glance", pref_on(L"glance_enabled", true));
+    d->SetString("glanceTrigger", store.GetPref(Store::kGlobalScope, L"glance_trigger").value_or(L"alt"));
+    d->SetString("urlbar", store.GetPref(Store::kGlobalScope, L"urlbar_behavior").value_or(L"floating-on-type"));
     d->SetString("profile", profile->record().name);
     d->SetBool("private", profile->is_private());
     d->SetString("version", ORBIT_VERSION);
     d->SetString("engine", CEF_VERSION);
     d->SetString("dataDir", profile->is_private() ? L"(in memory)" : profile->data_dir().wstring());
+    return Json(d);
+  }
+  if (api == L"routes") {
+    CefRefPtr<CefListValue> routes = CefListValue::Create();
+    size_t i = 0;
+    for (const SpaceRoute& r : ParseRoutes(store.GetPref(Store::kGlobalScope, L"space_routes").value_or(L""))) {
+      Dict e = CefDictionaryValue::Create();
+      e->SetString("match", r.match == SpaceRoute::Match::kEqualTo ? L"equal-to" : L"contains");
+      e->SetString("reference", r.reference);
+      e->SetDouble("space", static_cast<double>(r.space_id));
+      routes->SetDictionary(i++, e);
+    }
+    CefRefPtr<CefListValue> spaces = CefListValue::Create();
+    i = 0;
+    for (const auto& ws : profile->workspaces()) {
+      Dict e = CefDictionaryValue::Create();
+      e->SetDouble("id", static_cast<double>(ws->id()));
+      e->SetString("name", ws->record().name);
+      spaces->SetDictionary(i++, e);
+    }
+    Dict d = CefDictionaryValue::Create();
+    d->SetList("routes", routes);
+    d->SetList("spaces", spaces);
+    d->SetDouble("external", static_cast<double>(
+        _wtoi64(store.GetPref(Store::kGlobalScope, L"space_route_external").value_or(L"0").c_str())));
+    d->SetBool("private", profile->is_private());
+    return Json(d);
+  }
+  if (api == L"shortcuts") {
+    CefRefPtr<CefListValue> items = CefListValue::Create();
+    size_t i = 0;
+    for (const ShortcutAction& a : ShortcutActions()) {
+      Dict e = CefDictionaryValue::Create();
+      e->SetString("id", a.id);
+      e->SetString("group", a.group);
+      e->SetString("label", a.label);
+      e->SetString("key", FormatChord(app->shortcuts().Effective(a.id)));
+      e->SetString("default", FormatChord(a.key));
+      e->SetBool("custom", app->shortcuts().overrides().count(a.id) > 0);
+      items->SetDictionary(i++, e);
+    }
+    Dict d = CefDictionaryValue::Create();
+    d->SetList("items", items);
     return Json(d);
   }
   if (api == L"permissions") {
@@ -466,9 +543,26 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
     } else if (key == L"compact") {
       store.SetPref(Store::kGlobalScope, L"sidebar_compact", value == L"1" ? L"1" : L"0");
       app->ApplySidebarModeToAllWindows(value == L"1");
+    } else if (key == L"single_toolbar") {
+      // zen.view.use-single-toolbar
+      store.SetPref(Store::kGlobalScope, L"single_toolbar", value == L"0" ? L"0" : L"1");
+      app->ApplyThemeToAllWindows();
     } else if (key == L"hidden") {
       store.SetPref(Store::kGlobalScope, L"sidebar_hidden", value == L"1" ? L"1" : L"0");
       app->ApplyCompactModeToAllWindows(value == L"1");
+    } else if (key == L"pinned_close_behavior") {
+      static constexpr const wchar_t* kAllowed[] = {L"reset-unload-switch", L"unload-switch",
+                                                    L"reset-switch", L"switch", L"reset",
+                                                    L"close"};
+      if (std::none_of(std::begin(kAllowed), std::end(kAllowed),
+                       [&](const wchar_t* a) { return value == a; })) {
+        return Error(400, "bad");
+      }
+      store.SetPref(Store::kGlobalScope, key, value);
+    } else if (key == L"restore_pinned_to_pinned_url") {
+      store.SetPref(Store::kGlobalScope, key, value == L"1" ? L"1" : L"0");
+    } else if (key == L"select_recent_on_close" || key == L"close_on_back_no_history") {
+      store.SetPref(Store::kGlobalScope, key, value == L"1" ? L"1" : L"0");
     } else if (key == L"theme_strength") {
       static constexpr const wchar_t* kAllowed[] = {L"0", L"0.25", L"0.45", L"0.7"};
       if (std::none_of(std::begin(kAllowed), std::end(kAllowed),
@@ -485,11 +579,86 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
       }
       store.SetPref(Store::kGlobalScope, L"sleep_minutes", value);
       app->UpdateSleepPolicy();
+    } else if (key == L"newtab_button" || key == L"newtab_button_top" ||
+               key == L"ctrl_tab_skip_pending" || key == L"glance_enabled" ||
+               key == L"grey_out_inactive" || key == L"drag_window_from_content" ||
+               key == L"quick_actions" || key == L"tabs_right" || key == L"compact_flash" ||
+               key == L"search_suggestions" || key == L"ctrl_tab_ignore_essentials" ||
+               key == L"continue_where_left_off") {
+      store.SetPref(Store::kGlobalScope, key, value == L"1" ? L"1" : L"0");
+      app->ApplyThemeToAllWindows();  // windows re-read their settings
+    } else if (key == L"glance_trigger" || key == L"urlbar_behavior") {
+      static constexpr const wchar_t* kAllowed[] = {L"alt", L"ctrl", L"shift", L"normal",
+                                                    L"floating-on-type", L"float"};
+      const bool trigger = key == L"glance_trigger";
+      const bool ok = std::any_of(std::begin(kAllowed) + (trigger ? 0 : 3),
+                                  std::begin(kAllowed) + (trigger ? 3 : 6),
+                                  [&](const wchar_t* a) { return value == a; });
+      if (!ok) return Error(400, "bad");
+      store.SetPref(Store::kGlobalScope, key, value);
+      app->ApplyThemeToAllWindows();
     } else if (key == L"download_ask") {
       store.SetPref(Store::kGlobalScope, L"download_ask", value == L"1" ? L"1" : L"0");
     } else {
       return Error(400, "unknown setting");
     }
+    return Ok();
+  }
+  if (api == L"routes-set") {
+    // [{match: "contains"|"equal-to", reference, space}], external default.
+    std::vector<SpaceRoute> routes;
+    if (body->HasKey("routes") && body->GetType("routes") == VTYPE_LIST) {
+      CefRefPtr<CefListValue> list = body->GetList("routes");
+      for (size_t i = 0; i < list->GetSize() && i < 200; ++i) {
+        CefRefPtr<CefDictionaryValue> e = list->GetDictionary(i);
+        if (!e) continue;
+        SpaceRoute r;
+        r.match = Str(e, "match") == L"equal-to" ? SpaceRoute::Match::kEqualTo : SpaceRoute::Match::kContains;
+        r.reference = Str(e, "reference").substr(0, 2000);
+        r.space_id = Number(e, "space");
+        if (r.space_id && !profile->FindWorkspace(r.space_id)) continue;
+        routes.push_back(std::move(r));
+      }
+    }
+    store.SetPref(Store::kGlobalScope, L"space_routes", SerializeRoutes(routes));
+    const int64_t external = Number(body, "external");
+    store.SetPref(Store::kGlobalScope, L"space_route_external",
+                  external && profile->FindWorkspace(external) ? std::to_wstring(external) : L"0");
+    return Ok();
+  }
+  if (api == L"shortcut-record") {
+    app->SetShortcutRecording(body->HasKey("on") && body->GetBool("on"));
+    return Ok();
+  }
+  if (api == L"shortcut-set") {
+    const std::wstring id = Str(body, "id");
+    if (!FindShortcutAction(id)) return Error(400, "unknown shortcut");
+    KeyChord chord;
+    if (!(body->HasKey("disable") && body->GetBool("disable"))) {
+      chord.vk = static_cast<int>(Number(body, "vk"));
+      chord.ctrl = body->HasKey("ctrl") && body->GetBool("ctrl");
+      chord.shift = body->HasKey("shift") && body->GetBool("shift");
+      chord.alt = body->HasKey("alt") && body->GetBool("alt");
+      if (!AssignableChord(chord)) return Error(400, "use Ctrl or Alt with a key, or a function key");
+    }
+    const auto conflicts = app->shortcuts().Conflicts(id, chord);
+    if (!conflicts.empty() && !(body->HasKey("replace") && body->GetBool("replace"))) {
+      CefRefPtr<CefListValue> list = CefListValue::Create();
+      for (size_t i = 0; i < conflicts.size(); ++i) {
+        list->SetString(i, FindShortcutAction(conflicts[i])->label);
+      }
+      Dict d = CefDictionaryValue::Create();
+      d->SetList("conflicts", list);
+      d->SetString("key", FormatChord(chord));
+      return Json(d);
+    }
+    for (const std::wstring& other : conflicts) app->SetShortcut(other, {});  // replaced: unassigned
+    app->SetShortcut(id, chord);
+    app->SetShortcutRecording(false);
+    return Ok();
+  }
+  if (api == L"shortcut-reset") {
+    app->ResetShortcut(Str(body, "id"));
     return Ok();
   }
   if (api == L"permission-forget") {
@@ -536,7 +705,7 @@ InternalResponse DiagnosticsApi(const InternalRequest& req, Profile* profile) {
     }
     int live = 0, sleeping = 0, total = 0;
     auto count = [&](const Profile& p) {
-      for (const auto& ws : p.workspaces()) {
+      for (Workspace* ws : p.containers()) {
         for (const auto& t : ws->tabs()) {
           ++total;
           if (t->has_browser()) ++live;
@@ -585,6 +754,564 @@ InternalResponse NewTabApi(const InternalRequest& req, Profile* profile) {
   Dict d = CefDictionaryValue::Create();
   d->SetList("items", items);
   return Json(d);
+}
+
+// ---------------------------------------------------------------------------
+// Library panel (orbit://library). Window actions run as posted UI tasks so
+// that nothing modal or tab-switching happens inside a resource request; the
+// window is found again by its panel's browser id when the task runs.
+
+namespace {
+
+BrowserWindow* LibraryWindow(int browser_id) {
+  for (const auto& w : Application::Get()->windows()) {
+    if (browser_id && w->library_browser_id() == browser_id && !w->closing()) return w.get();
+  }
+  return nullptr;
+}
+
+void PostToLibraryWindow(int browser_id, std::function<void(BrowserWindow*)> action) {
+  CefPostTask(TID_UI, base::BindOnce(
+                          [](int id, std::function<void(BrowserWindow*)> run) {
+                            if (BrowserWindow* w = LibraryWindow(id)) run(w);
+                          },
+                          browser_id, std::move(action)));
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Site data panel (orbit://sitedata): acts only on the active tab of the
+// window whose panel calls it; the origin comes from that tab, never from
+// the request.
+
+namespace {
+
+BrowserWindow* SiteDataWindow(int browser_id) {
+  for (const auto& w : Application::Get()->windows()) {
+    if (browser_id && w->site_data_browser_id() == browser_id && !w->closing()) return w.get();
+  }
+  return nullptr;
+}
+
+std::wstring OriginOf(const std::wstring& url) {
+  CefURLParts parts;
+  if (!CefParseURL(url, parts)) return L"";
+  const std::wstring scheme = CefString(&parts.scheme).ToWString();
+  if (scheme != L"https" && scheme != L"http") return L"";
+  std::wstring origin = scheme + L"://" + CefString(&parts.host).ToWString();
+  const std::wstring port = CefString(&parts.port).ToWString();
+  if (!port.empty()) origin += L":" + port;
+  return origin;
+}
+
+std::wstring TrimSlash(std::wstring s) {
+  while (!s.empty() && s.back() == L'/') s.pop_back();
+  return s;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Theme picker (orbit://theme): edits the space its window's picker shows.
+
+InternalResponse ThemeApi(const InternalRequest& req, Profile* profile) {
+  BrowserWindow* window = nullptr;
+  for (const auto& w : Application::Get()->windows()) {
+    if (req.browser_id && w->theme_picker_browser_id() == req.browser_id && !w->closing()) window = w.get();
+  }
+  Workspace* ws = window ? window->theme_editing_space() : nullptr;
+  if (!ws || profile->is_private()) return Error(403, "not a theme picker");
+  Store& store = Application::Get()->store();
+  const std::wstring api = ApiName(req);
+  if (api == L"state") {
+    const SpaceTheme theme = ParseSpaceTheme(ws->record().theme).value_or(SpaceTheme{});
+    Dict d = CefDictionaryValue::Create();
+    d->SetDouble("space", static_cast<double>(ws->id()));
+    d->SetString("name", ws->record().name);
+    d->SetDouble("opacity", theme.opacity);
+    d->SetDouble("texture", theme.texture);
+    d->SetString("algorithm", theme.algorithm);
+    d->SetInt("lightness", theme.lightness);
+    CefRefPtr<CefListValue> dots = CefListValue::Create();
+    for (size_t i = 0; i < theme.dots.size(); ++i) {
+      const ThemeDot& t = theme.dots[i];
+      Dict e = CefDictionaryValue::Create();
+      e->SetInt("r", t.r);
+      e->SetInt("g", t.g);
+      e->SetInt("b", t.b);
+      e->SetDouble("x", t.x);
+      e->SetDouble("y", t.y);
+      e->SetString("type", t.type);
+      e->SetBool("primary", t.primary);
+      dots->SetDictionary(i, e);
+    }
+    d->SetList("dots", dots);
+    d->SetString("scheme", store.GetPref(Store::kGlobalScope, L"theme").value_or(L"system"));
+    return Json(d);
+  }
+  if (!req.trusted_action) return Error(403, "forbidden");
+  const Dict body = ParseBody(req);
+  if (api == L"set") {
+    auto num = [&](const Dict& o, const char* key, double fallback) {
+      if (!o->HasKey(key)) return fallback;
+      const auto type = o->GetType(key);
+      const double v = type == VTYPE_INT ? o->GetInt(key) : type == VTYPE_DOUBLE ? o->GetDouble(key) : fallback;
+      return std::isfinite(v) ? v : fallback;
+    };
+    SpaceTheme theme;
+    theme.opacity = static_cast<float>(std::clamp(num(body, "opacity", 0.5), 0.0, 1.0));
+    theme.texture = static_cast<float>(std::clamp(num(body, "texture", 0.0), 0.0, 1.0));
+    theme.lightness = static_cast<int>(std::clamp(num(body, "lightness", 50.0), 0.0, 100.0));
+    theme.algorithm = Str(body, "algorithm").substr(0, 32);
+    if (body->HasKey("dots") && body->GetType("dots") == VTYPE_LIST) {
+      CefRefPtr<CefListValue> list = body->GetList("dots");
+      for (size_t i = 0; i < list->GetSize() && theme.dots.size() < SpaceTheme::kMaxDots; ++i) {
+        Dict e = list->GetDictionary(i);
+        if (!e) continue;
+        ThemeDot t;
+        t.r = static_cast<int>(std::clamp(num(e, "r", 0), 0.0, 255.0));
+        t.g = static_cast<int>(std::clamp(num(e, "g", 0), 0.0, 255.0));
+        t.b = static_cast<int>(std::clamp(num(e, "b", 0), 0.0, 255.0));
+        t.x = static_cast<float>(std::clamp(num(e, "x", 0), -1000.0, 1000.0));
+        t.y = static_cast<float>(std::clamp(num(e, "y", 0), -1000.0, 1000.0));
+        t.type = Str(e, "type").substr(0, 32);
+        t.primary = e->HasKey("primary") && e->GetType("primary") == VTYPE_BOOL && e->GetBool("primary");
+        theme.dots.push_back(std::move(t));
+      }
+    }
+    // The stored form only keeps safe words; anything else becomes empty.
+    const auto checked = ParseSpaceTheme(SerializeSpaceTheme(theme));
+    const bool save = body->HasKey("save") && body->GetType("save") == VTYPE_BOOL && body->GetBool("save");
+    window->SetSpaceTheme(ws, checked, save);
+    return Ok();
+  }
+  if (api == L"scheme") {
+    // zen.view.window.scheme: auto / light / dark for every window.
+    const std::wstring scheme = Str(body, "scheme");
+    if (scheme != L"system" && scheme != L"light" && scheme != L"dark") return Error(400, "bad");
+    store.SetPref(Store::kGlobalScope, L"theme", scheme);
+    Application::Get()->ApplyThemeToAllWindows();
+    return Ok();
+  }
+  return Error(404, "unknown");
+}
+
+// ---------------------------------------------------------------------------
+// Boost editor (orbit://boost): edits the boost of the site its window's
+// editor was opened for.
+
+InternalResponse BoostApi(const InternalRequest& req, Profile* profile) {
+  BrowserWindow* window = nullptr;
+  for (const auto& w : Application::Get()->windows()) {
+    if (req.browser_id && w->boost_editor_browser_id() == req.browser_id && !w->closing()) window = w.get();
+  }
+  if (!window || window->boost_domain().empty() || profile->is_private()) return Error(403, "not a boost editor");
+  const std::wstring domain = window->boost_domain();
+  const std::wstring api = ApiName(req);
+  if (api == L"state") {
+    const std::optional<Boost> stored = LoadBoostForSite(profile, domain);
+    const Boost b = stored.value_or(Boost{});
+    Dict d = CefDictionaryValue::Create();
+    d->SetString("domain", domain);
+    d->SetBool("exists", stored.has_value());
+    d->SetString("name", b.name);
+    d->SetBool("enabled", b.enabled);
+    d->SetBool("color", b.color);
+    d->SetDouble("dotAngle", b.dot_angle);
+    d->SetDouble("dotDistance", b.dot_distance);
+    d->SetDouble("secondaryDelta", b.secondary_delta);
+    d->SetDouble("brightness", b.brightness);
+    d->SetDouble("saturation", b.saturation);
+    d->SetDouble("contrast", b.contrast);
+    d->SetBool("smartInvert", b.smart_invert);
+    d->SetString("font", b.font_family);
+    d->SetString("textCase", b.text_case);
+    d->SetDouble("size", b.size);
+    d->SetInt("zaps", static_cast<int>(b.zap.size()));
+    d->SetInt("focus", static_cast<int>(b.focus.size()));
+    d->SetString("css", b.custom_css);
+    d->SetString("pick", window->boost_pick_mode());
+    return Json(d);
+  }
+  if (!req.trusted_action) return Error(403, "forbidden");
+  const Dict body = ParseBody(req);
+  auto num = [&](const char* key, double fallback) {
+    if (!body->HasKey(key)) return fallback;
+    const auto t = body->GetType(key);
+    const double v = t == VTYPE_INT ? body->GetInt(key) : t == VTYPE_DOUBLE ? body->GetDouble(key) : fallback;
+    return std::isfinite(v) ? v : fallback;
+  };
+  auto flag = [&](const char* key, bool fallback) {
+    return body->HasKey(key) && body->GetType(key) == VTYPE_BOOL ? body->GetBool(key) : fallback;
+  };
+  if (api == L"set") {
+    // The editor's fields; zaps and focus targets are kept (they change by
+    // picking and clearing).
+    Boost b = LoadBoostForSite(profile, domain).value_or(Boost{});
+    if (body->HasKey("name")) b.name = Str(body, "name").substr(0, 100);
+    b.enabled = flag("enabled", b.enabled);
+    b.color = flag("color", b.color);
+    b.dot_angle = static_cast<float>(std::clamp(num("dotAngle", b.dot_angle), -720.0, 720.0));
+    b.dot_distance = static_cast<float>(std::clamp(num("dotDistance", b.dot_distance), 0.0, 1.0));
+    b.secondary_delta = static_cast<float>(std::clamp(num("secondaryDelta", b.secondary_delta), -360.0, 360.0));
+    b.brightness = static_cast<float>(std::clamp(num("brightness", b.brightness), 0.0, 1.0));
+    b.saturation = static_cast<float>(std::clamp(num("saturation", b.saturation), 0.0, 1.0));
+    b.contrast = static_cast<float>(std::clamp(num("contrast", b.contrast), 0.0, 1.0));
+    b.smart_invert = flag("smartInvert", b.smart_invert);
+    if (body->HasKey("font")) b.font_family = Str(body, "font").substr(0, 200);
+    if (body->HasKey("textCase")) b.text_case = Str(body, "textCase");
+    b.size = static_cast<float>(std::clamp(num("size", b.size), 0.3, 3.0));
+    if (body->HasKey("css")) b.custom_css = Str(body, "css").substr(0, 100000);
+    const auto checked = ParseBoost(SerializeBoost(b));  // normalises the text case and limits
+    SaveBoostForSite(profile, domain, checked);
+    return Ok();
+  }
+  if (api == L"pick") {
+    const std::wstring mode = Str(body, "mode");
+    window->SetBoostPickMode(mode);
+    return Ok();
+  }
+  if (api == L"clear") {
+    Boost b = LoadBoostForSite(profile, domain).value_or(Boost{});
+    if (Str(body, "list") == L"focus") {
+      b.focus.clear();
+    } else {
+      b.zap.clear();
+    }
+    SaveBoostForSite(profile, domain, b);
+    return Ok();
+  }
+  if (api == L"delete") {
+    window->SetBoostPickMode(L"off");
+    SaveBoostForSite(profile, domain, std::nullopt);
+    return Ok();
+  }
+  if (api == L"close") {
+    const int id = req.browser_id;
+    CefPostTask(TID_UI, base::BindOnce([](int browser) {
+      for (const auto& w : Application::Get()->windows()) {
+        if (w->boost_editor_browser_id() == browser) w->CloseBoostEditor();
+      }
+    }, id));
+    return Ok();
+  }
+  return Error(404, "unknown");
+}
+
+InternalResponse SiteDataApi(const InternalRequest& req, Profile* profile) {
+  BrowserWindow* window = SiteDataWindow(req.browser_id);
+  Tab* tab = window ? window->active_tab() : nullptr;
+  if (!tab) return Error(403, "not a site data panel");
+  Application* app = Application::Get();
+  const std::wstring api = ApiName(req);
+  const std::wstring origin = OriginOf(tab->url());
+  if (api == L"info") {
+    Dict d = CefDictionaryValue::Create();
+    d->SetString("title", tab->DisplayTitle());
+    d->SetString("url", tab->url());
+    d->SetString("origin", origin);
+    const wchar_t* security = L"none";
+    switch (tab->security()) {
+      case SecurityLevel::kSecure: security = L"secure"; break;
+      case SecurityLevel::kInsecure: security = L"not-secure"; break;
+      case SecurityLevel::kDangerous: security = L"dangerous"; break;
+      case SecurityLevel::kInternal: security = L"internal"; break;
+      default: break;
+    }
+    d->SetString("security", security);
+    d->SetBool("canCopy", tab->url().rfind(L"http", 0) == 0);
+    d->SetBool("canBoost", !profile->is_private() && !BoostDomain(tab->url()).empty());
+    d->SetBool("boosted", LoadBoostForSite(profile, BoostDomain(tab->url())).has_value());
+    d->SetBool("bookmarked", !profile->is_private() && app->store().FindBookmarkByUrl(profile->id(), tab->url()).has_value());
+    CefRefPtr<CefListValue> perms = CefListValue::Create();
+    size_t i = 0;
+    if (!origin.empty()) {
+      for (const auto& e : app->permissions().List(profile)) {
+        if (TrimSlash(e.origin) != origin) continue;
+        Dict p = CefDictionaryValue::Create();
+        p->SetInt("bit", static_cast<int>(e.permission));
+        std::wstring label = PermissionManager::Describe(e.permission);
+        while (!label.empty() && (label.back() == L'\n')) label.pop_back();
+        if (label.rfind(L"\u2022 ", 0) == 0) label = label.substr(2);
+        p->SetString("label", label);
+        p->SetBool("allowed", e.allowed);
+        perms->SetDictionary(i++, p);
+      }
+    }
+    d->SetList("permissions", perms);
+    return Json(d);
+  }
+  if (!req.trusted_action) return Error(403, "forbidden");
+  Dict body = ParseBody(req);
+  const int id = req.browser_id;
+  auto on_window = [id](std::function<void(BrowserWindow*)> run) {
+    CefPostTask(TID_UI, base::BindOnce(
+                            [](int browser, std::function<void(BrowserWindow*)> action) {
+                              if (BrowserWindow* w = SiteDataWindow(browser)) action(w);
+                            },
+                            id, std::move(run)));
+  };
+  if (api == L"permission") {
+    const uint32_t bit = static_cast<uint32_t>(Number(body, "bit"));
+    const bool allow = body->HasKey("allow") && body->GetBool("allow");
+    // Only a permission this origin already has an entry for.
+    for (const auto& e : app->permissions().List(profile)) {
+      if (TrimSlash(e.origin) == origin && e.permission == bit) {
+        app->permissions().Set(profile, e.origin, bit, allow);
+        return Ok();
+      }
+    }
+    return Error(400, "no such permission");
+  }
+  if (api == L"permission-reset") {
+    const uint32_t bit = static_cast<uint32_t>(Number(body, "bit"));
+    for (const auto& e : app->permissions().List(profile)) {
+      if (TrimSlash(e.origin) == origin && e.permission == bit) app->permissions().Forget(profile, e.origin, bit);
+    }
+    return Ok();
+  }
+  if (api == L"clear-site-data") {
+    if (origin.empty()) return Error(400, "not a web page");
+    // Storage.clearDataForOrigin: cookies, storage, caches of this origin.
+    if (CefRefPtr<CefBrowser> b = tab->browser()) {
+      CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
+      params->SetString("origin", origin);
+      params->SetString("storageTypes", "all");
+      b->GetHost()->ExecuteDevToolsMethod(0, "Storage.clearDataForOrigin", params);
+    }
+    on_window([](BrowserWindow* w) {
+      w->CloseSiteData();
+      if (Tab* t = w->active_tab()) t->Reload(false);
+    });
+    return Ok();
+  }
+  if (api == L"copy") {
+    on_window([](BrowserWindow* w) {
+      w->CloseSiteData();
+      w->CopyCurrentUrl();
+    });
+    return Ok();
+  }
+  if (api == L"bookmark") {
+    on_window([](BrowserWindow* w) { w->ToggleBookmarkActive(); });
+    return Ok();
+  }
+  if (api == L"settings") {
+    on_window([](BrowserWindow* w) {
+      w->CloseSiteData();
+      w->OpenTab(L"orbit://settings/", true);
+    });
+    return Ok();
+  }
+  if (api == L"boost") {
+    // zen-site-data-boost: the boost editor for this site.
+    on_window([](BrowserWindow* w) {
+      w->CloseSiteData();
+      w->OpenBoostEditor();
+    });
+    return Ok();
+  }
+  if (api == L"close") {
+    on_window([](BrowserWindow* w) { w->CloseSiteData(); });
+    return Ok();
+  }
+  return Error(404, "unknown endpoint");
+}
+
+// ---------------------------------------------------------------------------
+// Welcome (orbit://welcome, ZenWelcome). The page is an ordinary tab; its
+// choices are ids from fixed lists, never URLs or colours from the request.
+
+namespace {
+
+struct WelcomeApp {
+  const wchar_t* name;
+  const wchar_t* url;
+  uint32_t color;
+};
+// ZenWelcome's suggested Essentials.
+constexpr WelcomeApp kWelcomeApps[] = {
+    {L"Obsidian", L"https://obsidian.md", 0x7C3AED}, {L"Discord", L"https://discord.com", 0x5865F2},
+    {L"Trello", L"https://trello.com", 0x0052CC},    {L"Slack", L"https://slack.com", 0xE01E5A},
+    {L"GitHub", L"https://github.com", 0x57606A},    {L"Tuta", L"https://app.tuta.com/", 0xC00002},
+    {L"Notion", L"https://notion.com", 0x37352F},    {L"Calendar", L"https://calendar.google.com", 0x4285F4},
+    {L"Figma", L"https://figma.com", 0xF24E1E},
+};
+
+}  // namespace
+
+InternalResponse WelcomeApi(const InternalRequest& req, Profile* profile) {
+  Application* app = Application::Get();
+  Tab* tab = app->client()->FindTab(req.browser_id);
+  BrowserWindow* window = tab && tab->workspace() ? tab->workspace()->window() : nullptr;
+  if (!window) return Error(403, "not a welcome tab");
+  const std::wstring api = ApiName(req);
+  if (api == L"state") {
+    Dict d = CefDictionaryValue::Create();
+    CefRefPtr<CefListValue> engines = CefListValue::Create();
+    for (size_t i = 0; i < std::size(kSearchPresets); ++i) {
+      Dict e = CefDictionaryValue::Create();
+      e->SetString("name", kSearchPresets[i].name);
+      e->SetBool("current", app->search_template() == kSearchPresets[i].url);
+      engines->SetDictionary(i, e);
+    }
+    d->SetList("engines", engines);
+    CefRefPtr<CefListValue> apps = CefListValue::Create();
+    for (size_t i = 0; i < std::size(kWelcomeApps); ++i) {
+      Dict e = CefDictionaryValue::Create();
+      e->SetString("name", kWelcomeApps[i].name);
+      wchar_t color[8];
+      swprintf_s(color, L"%06X", kWelcomeApps[i].color);
+      e->SetString("color", color);
+      apps->SetDictionary(i, e);
+    }
+    d->SetList("apps", apps);
+    CefRefPtr<CefListValue> colors = CefListValue::Create();
+    for (size_t i = 0; i < std::size(ui::kAccentChoices); ++i) {
+      wchar_t color[8];
+      swprintf_s(color, L"%06X", ui::kAccentChoices[i]);
+      colors->SetString(i, color);
+    }
+    d->SetList("colors", colors);
+    d->SetBool("private", profile->is_private());
+    return Json(d);
+  }
+  if (!req.trusted_action) return Error(403, "forbidden");
+  if (api == L"import") {  // the Bookmarks page's importer (Netscape HTML)
+    InternalRequest forwarded = req;
+    forwarded.path = L"/api/import";
+    return BookmarksApi(forwarded, profile);
+  }
+  Dict body = ParseBody(req);
+  const int64_t index = Number(body, "index");
+  if (api == L"search") {
+    if (index < 0 || index >= static_cast<int64_t>(std::size(kSearchPresets))) return Error(400, "bad");
+    app->store().SetPref(Store::kGlobalScope, L"search_template", kSearchPresets[index].url);
+    return Ok();
+  }
+  const int browser = req.browser_id;
+  auto on_window = [browser](std::function<void(BrowserWindow*, Tab*)> run) {
+    CefPostTask(TID_UI, base::BindOnce(
+                            [](int id, std::function<void(BrowserWindow*, Tab*)> action) {
+                              Tab* t = Application::Get()->client()->FindTab(id);
+                              BrowserWindow* w = t && t->workspace() ? t->workspace()->window() : nullptr;
+                              if (w) action(w, t);
+                            },
+                            browser, std::move(run)));
+  };
+  if (api == L"essentials") {
+    std::vector<std::wstring> urls;
+    if (body->HasKey("apps") && body->GetType("apps") == VTYPE_LIST) {
+      CefRefPtr<CefListValue> list = body->GetList("apps");
+      for (size_t i = 0; i < list->GetSize() && i < std::size(kWelcomeApps); ++i) {
+        const int k = list->GetInt(i);
+        if (k >= 0 && k < static_cast<int>(std::size(kWelcomeApps))) urls.push_back(kWelcomeApps[k].url);
+      }
+    }
+    on_window([urls](BrowserWindow* w, Tab* welcome) {
+      for (const std::wstring& url : urls) {
+        if (Tab* t = w->OpenTabNear(welcome, url, false); t && w->CanAddToEssentials(t)) w->AddToEssentials(t);
+      }
+    });
+    return Ok();
+  }
+  if (api == L"space-color") {
+    if (index < 0 || index >= static_cast<int64_t>(std::size(ui::kAccentChoices))) return Error(400, "bad");
+    const uint32_t color = ui::kAccentChoices[index];
+    on_window([color](BrowserWindow* w, Tab*) { w->SetSpaceColor(color); });
+    return Ok();
+  }
+  if (api == L"default-browser") {
+    ::ShellExecuteW(nullptr, L"open", L"ms-settings:defaultapps?registeredAppUser=Orbit", nullptr,
+                    nullptr, SW_SHOWNORMAL);
+    return Ok();
+  }
+  if (api == L"done") {
+    app->store().SetPref(Store::kGlobalScope, L"welcome_done", L"1");
+    on_window([](BrowserWindow* w, Tab* welcome) { w->CloseTabShortcut(welcome); });
+    return Ok();
+  }
+  return Error(404, "unknown endpoint");
+}
+
+InternalResponse LibraryApi(const InternalRequest& req, Profile* profile) {
+  const std::wstring api = ApiName(req);
+  // The library's History and Downloads sections use those pages' APIs.
+  for (const wchar_t* section : {L"history/", L"downloads/"}) {
+    if (api.rfind(section, 0) == 0) {
+      InternalRequest forwarded = req;
+      forwarded.path = L"/api/" + api.substr(wcslen(section));
+      return section[0] == L'h' ? HistoryApi(forwarded, profile) : DownloadsApi(forwarded, profile);
+    }
+  }
+  BrowserWindow* window = LibraryWindow(req.browser_id);
+  if (!window) return Error(403, "not a library panel");
+  if (api == L"spaces") {
+    CefRefPtr<CefListValue> spaces = CefListValue::Create();
+    size_t i = 0;
+    for (const auto& ws : profile->workspaces()) {
+      Dict s = CefDictionaryValue::Create();
+      s->SetDouble("id", static_cast<double>(ws->id()));
+      s->SetString("name", ws->record().name);
+      s->SetString("icon", ws->record().icon);
+      s->SetBool("current", ws.get() == window->workspace());
+      CefRefPtr<CefListValue> tabs = CefListValue::Create();
+      size_t j = 0;
+      for (size_t k = 0; k < ws->tabs().size(); ++k) {
+        const Tab* t = ws->tabs()[k].get();
+        if (t->empty_placeholder()) continue;
+        Dict e = CefDictionaryValue::Create();
+        e->SetInt("index", static_cast<int>(k));
+        e->SetString("title", t->DisplayTitle());
+        e->SetString("url", t->url());
+        e->SetBool("pinned", t->pinned());
+        tabs->SetDictionary(j++, e);
+      }
+      s->SetList("tabs", tabs);
+      spaces->SetDictionary(i++, s);
+    }
+    Dict d = CefDictionaryValue::Create();
+    d->SetList("spaces", spaces);
+    return Json(d);
+  }
+  if (!req.trusted_action) return Error(403, "forbidden");
+  Dict body = ParseBody(req);
+  const int id = req.browser_id;
+  if (api == L"open") {
+    const std::wstring url = Str(body, "url");
+    if (url.rfind(L"https://", 0) != 0 && url.rfind(L"http://", 0) != 0) {
+      return Error(400, "only web pages open from the library");
+    }
+    PostToLibraryWindow(id, [url](BrowserWindow* w) {
+      w->CloseLibrary();
+      w->OpenTab(url, true);
+    });
+    return Ok();
+  }
+  if (api == L"close") {
+    PostToLibraryWindow(id, [](BrowserWindow* w) { w->CloseLibrary(); });
+    return Ok();
+  }
+  if (api == L"section") {
+    const std::wstring name = Str(body, "name");
+    if (name == L"spaces" || name == L"downloads" || name == L"history") {
+      Application::Get()->store().SetPref(Store::kGlobalScope, L"library_last_tab", name);  // zen.library.last-tab
+    }
+    return Ok();
+  }
+  if (api == L"spaces/show") {
+    const int64_t space = Number(body, "space");
+    const int tab = static_cast<int>(Number(body, "tab"));
+    PostToLibraryWindow(id, [space, tab](BrowserWindow* w) { w->LibraryShowSpace(space, tab); });
+    return Ok();
+  }
+  if (api == L"spaces/new") {
+    if (profile->is_private()) return Error(403, "no spaces in private windows");
+    PostToLibraryWindow(id, [](BrowserWindow* w) { w->LibraryNewSpace(); });
+    return Ok();
+  }
+  return Error(404, "unknown endpoint");
 }
 
 }  // namespace orbit

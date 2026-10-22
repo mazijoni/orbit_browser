@@ -6,6 +6,14 @@ add_library(orbit_core STATIC
   core/process_metrics.cpp
   core/strings.cpp
   core/url_fixup.cpp
+  core/omnibox_results.cpp
+  core/motion.cpp
+  core/split_layout.cpp
+  core/shortcuts.cpp
+  core/space_routing.cpp
+  core/live_folders.cpp
+  core/space_theme.cpp
+  core/boosts.cpp
   persistence/database.cpp
   persistence/schema.cpp
   persistence/store.cpp
@@ -27,6 +35,13 @@ add_library(orbit SHARED
   app/orbit_app.cpp
   app/orbit.rc
   browser/browser_client.cpp
+  browser/library_client.cpp
+  browser/live_folders.cpp
+  browser/text_fetch.cpp
+  browser/boost_apply.cpp
+  browser/library_page.cpp
+  browser/theme_page.cpp
+  browser/boost_page.cpp
   browser/external_protocol.cpp
   browser/internal_api.cpp
   browser/internal_page_content.cpp
@@ -41,6 +56,9 @@ add_library(orbit SHARED
   ui/browser_window_paint.cpp
   ui/graphics.cpp
   ui/theme.cpp
+  ui/toast.cpp
+  ui/download_flight.cpp
+  ui/share.cpp
 )
 SET_LIBRARY_TARGET_PROPERTIES(orbit)
 target_include_directories(orbit PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -53,7 +71,7 @@ target_link_libraries(orbit PRIVATE
   libcef_dll_wrapper
   "${CEF_LIB_RELEASE}"
   ${CEF_STANDARD_LIBS}
-  comctl32 d2d1 dwrite dwmapi oleaut32 shell32 ole32 propsys uiautomationcore user32 uxtheme)
+  comctl32 d2d1 dwrite dwmapi oleaut32 shell32 ole32 propsys uiautomationcore user32 uxtheme dbghelp runtimeobject)
 
 # Assemble a runnable layout in bin/: orbit.exe + orbit.dll + CEF runtime.
 add_executable(stamp_resources "${CMAKE_SOURCE_DIR}/tools/stamp_resources.cpp")

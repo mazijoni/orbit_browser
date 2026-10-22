@@ -99,6 +99,24 @@ TEST(History_QueryOrderSearchAndPaging) {
   EXPECT_EQ(wildcard.size(), 0u);  // user input is not a LIKE pattern
 }
 
+TEST(History_FrecencyRanksFrequentRecentPages) {
+  Fixture f;
+  const int64_t day = 86400000;
+  const int64_t now = 400 * day;
+  // Visited once yesterday vs. five times last week vs. once long ago.
+  f.store.AddVisit(f.profile, L"https://once.example/", L"Once", now - day);
+  for (int i = 0; i < 5; ++i) f.store.AddVisit(f.profile, L"https://often.example/", L"Often " + std::to_wstring(i), now - 7 * day - i);
+  f.store.AddVisit(f.profile, L"https://old.example/", L"Old", now - 200 * day);
+  const auto rows = f.store.QueryHistoryFrecent(f.profile, L"example", now, 10);
+  EXPECT_EQ(rows.size(), 3u);  // one row per URL
+  if (rows.size() == 3) {
+    EXPECT_WEQ(rows[0].url, L"https://often.example/");  // 5 x 70 beats 1 x 100
+    EXPECT_WEQ(rows[0].title, L"Often 0");               // the latest visit's title
+    EXPECT_WEQ(rows[1].url, L"https://once.example/");
+    EXPECT_WEQ(rows[2].url, L"https://old.example/");
+  }
+}
+
 TEST(History_DeleteRangeAndSingle) {
   Fixture f;
   for (int i = 0; i < 10; ++i) f.store.AddVisit(f.profile, L"https://a/" + std::to_wstring(i), L"", 100 * i);

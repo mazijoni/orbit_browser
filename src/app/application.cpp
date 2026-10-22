@@ -1,5 +1,8 @@
 #include "app/application.h"
 
+#include "app/self_test.h"
+#include "core/space_routing.h"
+
 #include <objbase.h>
 
 #include <algorithm>
@@ -91,22 +94,89 @@ void Application::LoadProfiles() {
   }
 }
 
+void Application::LoadShortcuts() {
+  shortcuts_.ResetAll();
+  for (const ShortcutAction& a : ShortcutActions()) {
+    const auto value = store_->GetPref(Store::kGlobalScope, std::wstring(L"shortcut:") + a.id);
+    if (!value) continue;
+    if (*value == L"none") {
+      shortcuts_.Set(a.id, {});
+    } else if (auto chord = ParseChord(*value); chord && AssignableChord(*chord)) {
+      shortcuts_.Set(a.id, *chord);
+    }
+  }
+}
+
+void Application::SetShortcut(const std::wstring& id, const KeyChord& chord) {
+  if (!FindShortcutAction(id)) return;
+  const ShortcutAction* a = FindShortcutAction(id);
+  const std::wstring key = L"shortcut:" + id;
+  if (chord == a->key) {
+    store_->DeletePref(Store::kGlobalScope, key);
+    shortcuts_.Reset(id);
+    return;
+  }
+  store_->SetPref(Store::kGlobalScope, key, chord.empty() ? L"none" : FormatChord(chord));
+  shortcuts_.Set(id, chord);
+}
+
+void Application::ResetShortcut(const std::wstring& id) {
+  for (const ShortcutAction& a : ShortcutActions()) {
+    if (id.empty() || id == a.id) {
+      store_->DeletePref(Store::kGlobalScope, std::wstring(L"shortcut:") + a.id);
+      shortcuts_.Reset(a.id);
+    }
+  }
+}
+
+Workspace* Application::RouteTarget(Profile* profile, const std::wstring& url, bool external) {
+  if (!profile || profile->is_private()) return nullptr;
+  const auto routes = ParseRoutes(store_->GetPref(Store::kGlobalScope, L"space_routes").value_or(L""));
+  const int64_t external_default =
+      _wtoi64(store_->GetPref(Store::kGlobalScope, L"space_route_external").value_or(L"0").c_str());
+  const auto target = RouteUrl(routes, url, external, external_default);
+  return target && *target ? profile->FindWorkspace(*target) : nullptr;
+}
+
+void Application::SetShortcutRecording(bool on) {
+  shortcut_recording_until_ = on ? ::GetTickCount64() + 15000 : 0;
+}
+
+bool Application::ShortcutRecording() const {
+  return ::GetTickCount64() < shortcut_recording_until_;
+}
+
 void Application::Start(const std::vector<std::wstring>& urls) {
   started_ = true;
+  LoadShortcuts();
   UpdateSleepPolicy();
+  // zen.workspaces.continue-where-left-off (default off): the session is
+  // restored, but each window opens on an empty tab with the URL bar
+  // (ZenSpaceManager selects its empty tab) rather than the last tab.
+  const bool start_empty =
+      store_->GetPref(Store::kGlobalScope, L"continue_where_left_off").value_or(L"0") != L"1";
   for (const WindowRecord& rec : store_->LoadWindows()) {
     Profile* profile = FindProfile(rec.profile_id);
     if (!profile) continue;
     Workspace* ws = profile->FindWorkspace(rec.workspace_id);
     if (!ws || ws->window()) ws = FreeWorkspaceFor(profile);
-    OpenWindow(profile, ws, &rec);
+    OpenWindow(profile, ws, &rec, start_empty);
   }
+  const bool first_run = windows_.empty();
   if (windows_.empty() && !profiles_.empty()) {
     OpenWindow(profiles_.front().get(), FreeWorkspaceFor(profiles_.front().get()), nullptr);
   }
   if (!windows_.empty()) {
-    for (const auto& url : urls) windows_.front()->OpenTab(url, true);
+    for (const auto& url : urls) windows_.front()->OpenRoutedTab(url, true, /*external=*/true);
+    // ZenWelcome: the first start of a new profile shows the onboarding
+    // once (never during self-tests, which count tabs).
+    if (first_run && urls.empty() && !self_test::IsActive() &&
+        !store_->GetPref(Store::kGlobalScope, L"welcome_shown")) {
+      store_->SetPref(Store::kGlobalScope, L"welcome_shown", L"1");
+      windows_.front()->OpenTab(L"orbit://welcome/", true);
+    }
   }
+  live_folders_.Load();
 }
 
 void Application::OnRelaunch(const std::vector<std::wstring>& urls) {
@@ -124,13 +194,14 @@ void Application::OnRelaunch(const std::vector<std::wstring>& urls) {
                         nullptr);
   }
   if (!target) return;
-  for (const auto& url : urls) target->OpenTab(url, true);
+  for (const auto& url : urls) target->OpenRoutedTab(url, true, /*external=*/true);
   if (::IsIconic(target->hwnd())) ::ShowWindow(target->hwnd(), SW_RESTORE);
   ::SetForegroundWindow(target->hwnd());
 }
 
 void Application::Shutdown() {
   SaveNow();
+  live_folders_.Shutdown();
   windows_.clear();
   closing_tabs_.clear();
   private_profiles_.clear();
@@ -248,7 +319,7 @@ void Application::DeleteProfile(Profile* profile) {
   }
   // Unload hidden live tabs hosted by other windows of this profile (none can
   // exist after BeginClose, but be defensive about popups in creation).
-  for (const auto& ws : profile->workspaces()) {
+  for (Workspace* ws : profile->containers()) {
     for (const auto& t : ws->tabs()) t->Unload(false);
   }
   CheckPendingWindowCloses();
@@ -319,6 +390,20 @@ void Application::UpdateVisitTitle(Tab* tab) {
   store_->UpdateLatestVisitTitle(profile->id(), tab->url(), tab->record().title);
 }
 
+std::wstring Application::GlanceTrigger() {
+  if (store_->GetPref(Store::kGlobalScope, L"glance_enabled").value_or(L"1") != L"1") return L"";
+  const std::wstring trigger =
+      store_->GetPref(Store::kGlobalScope, L"glance_trigger").value_or(L"alt");
+  return trigger == L"ctrl" || trigger == L"shift" ? trigger : L"alt";
+}
+
+CefRefPtr<CefDictionaryValue> Application::RendererInfo() {
+  CefRefPtr<CefDictionaryValue> info = CefDictionaryValue::Create();
+  info->SetString("glance", GlanceTrigger());
+  info->SetBool("drag", store_->GetPref(Store::kGlobalScope, L"drag_window_from_content").value_or(L"1") == L"1");
+  return info;
+}
+
 void Application::ApplyThemeToAllWindows() {
   for (const auto& w : windows_) w->ApplyTheme();
 }
@@ -348,7 +433,7 @@ Workspace* Application::FreeWorkspaceFor(Profile* profile) {
 }
 
 BrowserWindow* Application::OpenWindow(Profile* profile, Workspace* workspace,
-                                       const WindowRecord* placement) {
+                                       const WindowRecord* placement, bool start_empty) {
   if (!profile || !workspace) return nullptr;
   auto window = std::make_unique<BrowserWindow>(profile);
   BrowserWindow* raw = window.get();
@@ -357,7 +442,7 @@ BrowserWindow* Application::OpenWindow(Profile* profile, Workspace* workspace,
     windows_.pop_back();
     return nullptr;
   }
-  raw->ShowWorkspace(workspace, placement ? placement->active_tab_id : 0);
+  raw->ShowWorkspace(workspace, placement ? placement->active_tab_id : 0, start_empty);
   ScheduleSave();
   return raw;
 }
@@ -399,6 +484,15 @@ void Application::OnWindowDestroyed(BrowserWindow* window) {
   MaybeQuit();
 }
 
+namespace {
+int64_t NowUnixMillisForBatch() {
+  FILETIME ft;
+  ::GetSystemTimeAsFileTime(&ft);
+  const ULONGLONG t = (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+  return static_cast<int64_t>(t / 10000ULL);
+}
+}  // namespace
+
 void Application::RememberClosedTab(Tab* tab) {
   Profile* profile = tab->profile();
   if (!profile || profile->is_private()) return;
@@ -408,21 +502,35 @@ void Application::RememberClosedTab(Tab* tab) {
   rec.workspace_id = tab->workspace() ? tab->workspace()->id() : 0;
   rec.url = tab->url();
   rec.title = tab->record().title;
+  rec.batch_id = tab->close_batch();
   store_->PushClosedTab(rec);
+}
+
+std::vector<BrowserWindow*> Application::WindowsShowing(Workspace* ws) const {
+  std::vector<BrowserWindow*> out;
+  if (ws->profile()->essentials() == ws) {
+    for (const auto& w : windows_) {
+      if (w->profile() == ws->profile() && !w->closing()) out.push_back(w.get());
+    }
+  } else if (ws->window()) {
+    out.push_back(ws->window());
+  }
+  return out;
 }
 
 void Application::RemoveTab(Tab* tab, bool remember) {
   Workspace* ws = tab->workspace();
   if (!ws) return;
+  if (!remember) live_folders_.ForgetTab(tab);  // not the user's close
   if (remember) RememberClosedTab(tab);
-  BrowserWindow* window = ws->window();
-  if (window) window->OnTabRemoving(tab);
+  const std::vector<BrowserWindow*> windows = WindowsShowing(ws);
+  for (BrowserWindow* w : windows) w->OnTabRemoving(tab);
   const bool persistent = !ws->profile()->is_private();
   const int64_t id = tab->id();
   std::unique_ptr<Tab> owned = ws->RemoveTab(tab);
   if (persistent && id) store_->DeleteTab(id);
   owned.reset();
-  if (window) window->OnTabsChanged();
+  for (BrowserWindow* w : windows) w->OnTabsChanged();
 }
 
 void Application::DetachClosingTab(Tab* tab) {
@@ -430,13 +538,13 @@ void Application::DetachClosingTab(Tab* tab) {
   Workspace* ws = tab->workspace();
   if (!ws) return;
   RememberClosedTab(tab);
-  BrowserWindow* window = ws->window();
-  if (window) window->OnTabRemoving(tab);
+  const std::vector<BrowserWindow*> windows = WindowsShowing(ws);
+  for (BrowserWindow* w : windows) w->OnTabRemoving(tab);
   const bool persistent = !ws->profile()->is_private();
   const int64_t id = tab->id();
   closing_tabs_.push_back(ws->RemoveTab(tab));
   if (persistent && id) store_->DeleteTab(id);
-  if (window) window->OnTabsChanged();
+  for (BrowserWindow* w : windows) w->OnTabsChanged();
 }
 
 void Application::OnBrowserClosed(Tab* tab) {
@@ -449,10 +557,23 @@ void Application::OnBrowserClosed(Tab* tab) {
 bool Application::ReopenClosedTab(BrowserWindow* window) {
   Profile* profile = window->profile();
   if (profile->is_private()) return false;
-  auto rec = store_->PopClosedTab(profile->id());
-  if (!rec) return false;
-  window->OpenTab(rec->url, /*activate=*/true);
+  // Firefox's undoCloseTab restores every tab of the last close action.
+  const auto batch = store_->PopClosedTabBatch(profile->id());
+  if (batch.empty()) return false;
+  for (size_t i = 0; i < batch.size(); ++i) {
+    window->OpenTab(batch[i].url, /*activate=*/i + 1 == batch.size());
+  }
   return true;
+}
+
+void Application::CloseTabsTogether(const std::vector<Tab*>& tabs) {
+  if (tabs.empty()) return;
+  static int64_t last_batch = 0;
+  last_batch = std::max(last_batch + 1, NowUnixMillisForBatch());
+  for (Tab* t : tabs) t->set_close_batch(tabs.size() > 1 ? last_batch : 0);
+  // RequestClose may delete an unloaded tab immediately; iterate a copy.
+  const std::vector<Tab*> copy = tabs;
+  for (Tab* t : copy) t->RequestClose();
 }
 
 void Application::CheckPendingWindowCloses() {
@@ -465,13 +586,14 @@ void Application::CheckPendingWindowCloses() {
     bool waiting = std::any_of(closing_tabs_.begin(), closing_tabs_.end(),
                                [&](const auto& t) { return t->window() == w; });
     auto check_profile = [&](const Profile& p) {
-      for (const auto& ws : p.workspaces()) {
+      for (Workspace* ws : p.containers()) {
         for (const auto& t : ws->tabs()) {
           if (t->window() == w && t->load_state() != Tab::LoadState::kUnloaded) return true;
         }
       }
       return false;
     };
+    waiting = waiting || w->library_alive();  // its library panel's browser
     for (const auto& p : profiles_) waiting = waiting || check_profile(*p);
     for (const auto& p : private_profiles_) waiting = waiting || check_profile(*p);
     if (!waiting) {
@@ -520,7 +642,7 @@ int Application::ApplySleepPolicy(int64_t idle_ms) {
   const int64_t now = NowUnixMillis();
   const ULONGLONG tick = ::GetTickCount64();
   auto consider = [&](const Profile& profile) {
-    for (const auto& ws : profile.workspaces()) {
+    for (Workspace* ws : profile.containers()) {
       for (const auto& t : ws->tabs()) {
         Tab* tab = t.get();
         const bool visible = ws->window() && ws->active_tab() == tab;
@@ -581,7 +703,7 @@ void Application::SaveNow() {
   if (!store_) return;
   Database::Transaction txn(db_);
   for (const auto& p : profiles_) {
-    for (const auto& ws : p->workspaces()) {
+    for (Workspace* ws : p->containers()) {
       for (const auto& t : ws->tabs()) {
         if (t->dirty() && t->id()) {
           store_->UpdateTab(t->record());

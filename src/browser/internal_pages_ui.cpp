@@ -276,6 +276,26 @@ InternalResponse SettingsPage(const InternalRequest& req) {
   const std::string body = R"html(
 <main>
   <h1>Settings</h1>
+  <h2>Startup</h2>
+  <div class="card">
+    <div class="row" style="padding-left:0"><label class="grow" for="continueLeftOff">Continue where you left off</label><input type="checkbox" id="continueLeftOff"></div>
+  </div>
+  <h2>Look and Feel</h2>
+  <div class="card">
+    <div class="muted" style="margin:0 0 8px">Layout</div>
+    <div role="radiogroup" aria-label="Layout" id="layouts" style="display:flex;gap:12px;margin-bottom:12px"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="tabsRight">Tabs on the right</label><input type="checkbox" id="tabsRight"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="newtabButton">Show the New Tab button in the tab list</label><input type="checkbox" id="newtabButton"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="newtabTop">Place the New Tab button above the tabs</label><input type="checkbox" id="newtabTop"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="urlbar">Address bar</label>
+      <select id="urlbar"><option value="normal">Normal</option><option value="floating-on-type">Floating only when typing</option><option value="float">Always floating</option></select></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="greyOut">Grey out inactive windows</label><input type="checkbox" id="greyOut"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="dragFromContent">Drag the window from the top of the page (applies to newly opened pages)</label><input type="checkbox" id="dragFromContent"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="quickActions">Suggest quick actions in the address bar</label><input type="checkbox" id="quickActions"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="glance">Glance: preview links with a modifier+click</label><input type="checkbox" id="glance"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="glanceTrigger">Glance trigger (applies to newly opened pages)</label>
+      <select id="glanceTrigger"><option value="alt">Alt + click</option><option value="ctrl">Ctrl + click</option><option value="shift">Shift + click</option></select></div>
+  </div>
   <h2>Appearance</h2>
   <div class="card">
     <div class="row" style="padding-left:0"><div class="grow">Theme</div>
@@ -284,11 +304,32 @@ InternalResponse SettingsPage(const InternalRequest& req) {
     <div class="row" style="padding-left:0"><label class="grow" for="themeStrength">Space theme color</label>
       <select id="themeStrength"><option value="0">Off</option><option value="0.25">Subtle</option><option value="0.45">Normal</option><option value="0.7">Vivid</option></select></div>
     <div class="row" style="padding-left:0"><label class="grow" for="hidden">Compact mode (hide the sidebar until the pointer reaches the left edge)</label><input type="checkbox" id="hidden"></div>
-    <div class="row" style="padding-left:0"><label class="grow" for="compact">Collapse the sidebar to icons</label><input type="checkbox" id="compact"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="compactFlash">Briefly make the toolbar popup when switching or opening new tabs in compact mode</label><input type="checkbox" id="compactFlash"></div>
+  </div>
+  <h2>Tab Management</h2>
+  <div class="card">
+    <div class="row" style="padding-left:0"><label class="grow" for="selectRecent">Select the most recently used tab when closing a tab</label><input type="checkbox" id="selectRecent"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="closeOnBack">Close the tab when going back with no history (tabs opened from another tab)</label><input type="checkbox" id="closeOnBack"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="ctrlTabSkipPending">Ctrl+Tab skips tabs that are not loaded</label><input type="checkbox" id="ctrlTabSkipPending"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="ctrlTabWithin">Ctrl+Tab cycles within Essential or Workspace tabs only</label><input type="checkbox" id="ctrlTabWithin"></div>
+  </div>
+  <h2>Pinned Tabs</h2>
+  <div class="card">
+    <div class="row" style="padding-left:0"><label class="grow" for="restorePinned">Restore pinned tabs to their pinned URL on startup</label><input type="checkbox" id="restorePinned"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="pinnedClose">Close shortcut behavior on pinned tabs</label>
+      <select id="pinnedClose">
+        <option value="reset-unload-switch">Reset URL, unload and switch to next tab</option>
+        <option value="unload-switch">Unload and switch to next tab</option>
+        <option value="reset-switch">Reset URL and switch to next tab</option>
+        <option value="switch">Switch to next tab</option>
+        <option value="reset">Reset URL</option>
+        <option value="close">Close tab</option>
+      </select></div>
   </div>
   <h2>Search</h2>
   <div class="card">
     <div class="row" style="padding-left:0"><label class="grow" for="engine">Search engine used in the address bar</label><select id="engine"></select></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="searchSuggestions">Show search suggestions (what you type is sent to the search engine)</label><input type="checkbox" id="searchSuggestions"></div>
     <div class="row" style="padding-left:0" id="customRow" hidden>
       <input id="custom" type="text" style="flex:1" placeholder="https://example.com/search?q={query}" aria-label="Custom search URL">
       <button id="saveCustom">Save</button></div>
@@ -302,6 +343,20 @@ InternalResponse SettingsPage(const InternalRequest& req) {
     <p class="muted" style="margin:4px 0 0">Sleeping tabs release their memory and reload when selected. Pinned tabs, tabs marked
       "Never put to sleep", tabs using the camera or microphone and tabs playing audio are never put to sleep.
       Reloading can lose unsaved form input.</p>
+  </div>
+  <h2>Space Routing</h2>
+  <div class="card">
+    <p class="muted" style="margin:0 0 8px">Routes let you choose where specific sites open. For example, you can route YouTube links to always open inside your Personal space.</p>
+    <div id="routes"></div>
+    <div class="toolbar" style="margin:8px 0 0"><button id="newRoute">New Route</button>
+      <label class="grow" for="routeExternal" style="text-align:right">Default route for external links</label><select id="routeExternal"></select></div>
+  </div>
+  <h2>Keyboard Shortcuts</h2>
+  <div class="card">
+    <div class="toolbar" style="margin-bottom:6px"><input type="search" id="kbsFilter" placeholder="Search shortcuts" style="flex:1" aria-label="Search shortcuts">
+      <button id="kbsResetAll">Reset all</button></div>
+    <div id="kbsNote" class="muted" style="min-height:18px"></div>
+    <div id="kbs"></div>
   </div>
   <h2>Site permissions</h2>
   <div class="card" id="perms"></div>
@@ -339,12 +394,55 @@ async function set(key, value) {
              (a === s.accent ? 'outline:2px solid var(--text);outline-offset:2px' : ''),
       onclick: async () => { await set('accent', a); location.reload(); }}));
   }
-  const compact = document.getElementById('compact');
-  compact.checked = s.compact;
-  compact.addEventListener('change', () => set('compact', compact.checked ? '1' : '0'));
+  // zenLooks layout cards: Single toolbar, Multiple toolbars, Collapsed toolbar.
+  const layouts = document.getElementById('layouts');
+  const card = (value, label, collapsed, single) => {
+    const pressed = s.compact === collapsed && s.singleToolbar === single;
+    const shade = 'background:color-mix(in srgb,currentColor 18%,transparent)';
+    const page = el('div', {style: 'flex:1;display:flex;flex-direction:column;gap:3px'},
+      ...(single ? [] : [el('div', {style: 'height:8px;border-radius:3px;' + shade})]),
+      el('div', {style: 'flex:1;border-radius:4px;background:var(--bg)'}));
+    const sketch = el('div', {style: 'display:flex;gap:4px;height:64px;padding:6px;border-radius:8px;background:var(--surface2)'},
+      el('div', {style: 'width:' + (collapsed ? '12px' : '34px') + ';border-radius:4px;' + shade}), page);
+    return el('button', {role: 'radio', 'aria-checked': pressed, 'aria-label': label,
+      style: 'flex:1;display:flex;flex-direction:column;gap:8px;padding:10px;text-align:left;' +
+             (pressed ? 'outline:2px solid var(--accent);outline-offset:1px' : ''),
+      onclick: async () => {
+        await set('single_toolbar', single ? '1' : '0');
+        await set('compact', collapsed ? '1' : '0');
+        location.reload();
+      }}, sketch, el('span', {}, label));
+  };
+  layouts.append(card('single', 'Single toolbar', false, true), card('multiple', 'Multiple toolbars', false, false),
+                 card('collapsed', 'Collapsed toolbar', true, false));
+  for (const [id, key] of [['newtabButton', 'newtab_button'], ['newtabTop', 'newtab_button_top'],
+                           ['ctrlTabSkipPending', 'ctrl_tab_skip_pending'], ['glance', 'glance_enabled'],
+                           ['greyOut', 'grey_out_inactive'], ['dragFromContent', 'drag_window_from_content'],
+                           ['quickActions', 'quick_actions'], ['tabsRight', 'tabs_right'],
+                           ['compactFlash', 'compact_flash'], ['searchSuggestions', 'search_suggestions'],
+                           ['ctrlTabWithin', 'ctrl_tab_ignore_essentials'],
+                           ['continueLeftOff', 'continue_where_left_off']]) {
+    const box = document.getElementById(id);
+    box.checked = s[id];
+    box.addEventListener('change', () => set(key, box.checked ? '1' : '0'));
+  }
+  for (const [id, key, value] of [['urlbar', 'urlbar_behavior', s.urlbar], ['glanceTrigger', 'glance_trigger', s.glanceTrigger]]) {
+    const select = document.getElementById(id);
+    select.value = value;
+    select.addEventListener('change', () => set(key, select.value));
+  }
   const hidden = document.getElementById('hidden');
   hidden.checked = s.hidden;
   hidden.addEventListener('change', () => set('hidden', hidden.checked ? '1' : '0'));
+  const pinnedClose = document.getElementById('pinnedClose');
+  pinnedClose.value = s.pinnedClose;
+  pinnedClose.addEventListener('change', () => set('pinned_close_behavior', pinnedClose.value));
+  for (const [id, key] of [['selectRecent', 'select_recent_on_close'], ['closeOnBack', 'close_on_back_no_history'],
+                           ['restorePinned', 'restore_pinned_to_pinned_url']]) {
+    const box = document.getElementById(id);
+    box.checked = s[id];
+    box.addEventListener('change', () => set(key, box.checked ? '1' : '0'));
+  }
   const strength = document.getElementById('themeStrength');
   strength.value = ['0', '0.25', '0.45', '0.7'].includes(s.themeStrength) ? s.themeStrength : '0.45';
   strength.addEventListener('change', () => set('theme_strength', strength.value));
@@ -392,6 +490,97 @@ async function set(key, value) {
       : [el('p', {class: 'muted', style: 'margin:0'}, 'No site has asked for permissions yet. Sites must ask before using your camera, microphone, location or similar features.')]));
   }
   loadPerms();
+
+  // Keyboard Shortcuts (gZenCKSSettings): click a key to record a new one;
+  // Backspace disables, Escape cancels; conflicts ask before replacing.
+  const kbs = document.getElementById('kbs'), note = document.getElementById('kbsNote');
+  const filter = document.getElementById('kbsFilter');
+  let recording = null;
+  async function loadKbs() {
+    const {items} = await (await fetch('/api/shortcuts')).json();
+    const q = filter.value.trim().toLowerCase();
+    let group = '';
+    kbs.replaceChildren();
+    for (const it of items) {
+      if (q && !(it.label + ' ' + it.key + ' ' + it.group).toLowerCase().includes(q)) continue;
+      if (it.group !== group) { group = it.group; kbs.append(el('div', {class: 'muted', style: 'margin:12px 0 4px;font-size:12px;font-weight:600'}, group)); }
+      const key = el('button', {'data-id': it.id, 'aria-label': 'Shortcut for ' + it.label + ': ' + (it.key || 'none'),
+        style: 'min-width:150px;font-family:inherit'}, it.key || 'Not set');
+      key.onclick = () => record(it, key);
+      const reset = el('button', {hidden: !it.custom, title: 'Reset to ' + (it.default || 'none'),
+        onclick: async () => { await orbitAction('/api/shortcut-reset', {id: it.id}); loadKbs(); }}, 'Reset');
+      kbs.append(el('div', {class: 'row', style: 'padding-left:0'}, el('div', {class: 'grow'}, it.label), reset, key));
+    }
+  }
+  async function stopRecording() {
+    if (!recording) return;
+    recording = null;
+    await orbitAction('/api/shortcut-record', {on: false}).catch(() => {});
+  }
+  async function record(it, button) {
+    await stopRecording();
+    recording = it;
+    button.textContent = 'Press keys\u2026';
+    note.textContent = 'Press the new shortcut for "' + it.label + '". Backspace removes it, Escape cancels.';
+    await orbitAction('/api/shortcut-record', {on: true});
+  }
+  addEventListener('keydown', async (e) => {
+    if (!recording) return;
+    if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+    e.preventDefault(); e.stopPropagation();
+    const it = recording;
+    if (e.key === 'Escape') { await stopRecording(); note.textContent = ''; loadKbs(); return; }
+    const body = e.key === 'Backspace' && !e.ctrlKey && !e.altKey ? {id: it.id, disable: true}
+        : {id: it.id, vk: e.keyCode, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey};
+    let r;
+    try { r = await orbitAction('/api/shortcut-set', body); }
+    catch (err) { note.textContent = 'Use Ctrl or Alt with a key, or a function key.'; return; }
+    if (r.conflicts) {
+      if (!confirm(r.key + ' is used by "' + r.conflicts.join('", "') + '". Use it for "' + it.label + '" instead?')) {
+        await stopRecording(); note.textContent = ''; loadKbs(); return;
+      }
+      await orbitAction('/api/shortcut-set', Object.assign({replace: true}, body));
+    }
+    recording = null;
+    note.textContent = 'Saved.';
+    loadKbs();
+  }, true);
+  addEventListener('blur', () => { if (recording) { stopRecording(); note.textContent = ''; loadKbs(); } });
+  filter.addEventListener('input', loadKbs);
+  document.getElementById('kbsResetAll').addEventListener('click', async () => {
+    if (!confirm('Reset every keyboard shortcut to its default?')) return;
+    await orbitAction('/api/shortcut-reset', {id: ''}); note.textContent = ''; loadKbs();
+  });
+  loadKbs();
+
+  // Space Routing (ZenSpaceRoutingDialog): Contains / Is Equal To, Open In.
+  const routesBox = document.getElementById('routes'), externalSel = document.getElementById('routeExternal');
+  let routing = await (await fetch('/api/routes')).json();
+  const spaceOptions = (sel, value) => {
+    sel.replaceChildren(el('option', {value: '0'}, 'Most recent Space'),
+        ...routing.spaces.map(sp => el('option', {value: String(sp.id)}, sp.name)));
+    sel.value = String(value);
+  };
+  const saveRoutes = () => orbitAction('/api/routes-set', {routes: routing.routes, external: Number(externalSel.value)});
+  function drawRoutes() {
+    routesBox.replaceChildren(...(routing.routes.length ? [] : [el('p', {class: 'muted', style: 'margin:0'}, 'No routes yet.')]));
+    routing.routes.forEach((r, i) => {
+      const match = el('select', {'aria-label': 'Match'}, el('option', {value: 'contains'}, 'Contains'), el('option', {value: 'equal-to'}, 'Is Equal To'));
+      match.value = r.match;
+      const url = el('input', {type: 'text', value: r.reference, placeholder: r.match === 'contains' ? 'youtube.com' : 'https://example.com', 'aria-label': 'URL', style: 'flex:1'});
+      const space = el('select', {'aria-label': 'Open in Space'});
+      spaceOptions(space, r.space);
+      match.onchange = () => { r.match = match.value; saveRoutes(); };
+      url.onchange = () => { r.reference = url.value.trim(); saveRoutes(); };
+      space.onchange = () => { r.space = Number(space.value); saveRoutes(); };
+      const remove = el('button', {'aria-label': 'Remove route', onclick: () => { routing.routes.splice(i, 1); saveRoutes(); drawRoutes(); }}, 'Remove');
+      routesBox.append(el('div', {class: 'row', style: 'padding-left:0'}, match, url, el('span', {class: 'muted'}, 'Open in'), space, remove));
+    });
+  }
+  spaceOptions(externalSel, routing.external);
+  externalSel.onchange = saveRoutes;
+  document.getElementById('newRoute').onclick = () => { routing.routes.push({match: 'contains', reference: '', space: 0}); drawRoutes(); };
+  drawRoutes();
   document.getElementById('about').append(
     el('div', {}, 'Orbit ' + s.version),
     el('div', {class: 'muted'}, 'Engine: Chromium Embedded Framework ' + s.engine),

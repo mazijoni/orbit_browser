@@ -1,0 +1,24 @@
+# Zen parity: animation inventory
+
+Reference values come from `prefs/zen/*.yaml` and the CSS/JS cited, at commit `541ee55`. Orbit's animations run on `orbit::Transition` (`src/core/motion.h`, unit-tested) with a 15ms window timer that runs only while something moves. `ui::AnimMs` makes every duration 0 when Windows' animation effects are off.
+Orbit constraint: chrome animations must be driven by a timer (or `DCompositionWaitForCompositorClock`) repainting Direct2D. Anything that moves the web content means repositioning a child HWND each frame, which is possible but must stay cheap: move only, never resize. Reduced motion: honor `SPI_GETCLIENTAREAANIMATION`.
+
+| Transition | Reference | Trigger | Properties | Duration / easing | Status |
+|---|---|---|---|---|---|
+| Compact sidebar hide/show | `ZenCompactMode.animateCompactMode` | Toggle compact mode | margin-left −width → 0 | 0.1s spring, bounce 0 (easeIn hide, easeOut show) | IMPLEMENTED (the overlay window moves, the page never resizes; one spring both ways; reveal/hide checked on screen, mid-slide frame not captured) |
+| Compact sidebar hover keep-open | `zen.view.compact.sidebar-keep-hover.duration=150` | Pointer leaves the sidebar | Delay before hiding | 150ms | IMPLEMENTED (150ms hide delay, then the slide) |
+| Toolbar hide after hover | `zen.view.compact.toolbar-hide-after-hover.duration=1000` | Pointer leaves the top area | Delay | 1000ms | IMPLEMENTED (window controls hide after 1000ms) |
+| Toolbar flash popup | `zen.view.compact.toolbar-flash-popup.duration=800` | Tab change in compact mode | Show then hide | 800ms | TESTED (setting off by default; self-test `zen`) |
+| Space switch | `zen.workspaces.switch-animation-duration=250`, `ZenSpaceManager.changeWorkspace` | Switch space | Tab lists slide horizontally, background crossfade | 250ms | IMPLEMENTED: the old space's indicator and list are snapshotted into a bitmap and slide out while the new one slides in (spring, bounce 0, shorter way round via `SpaceSwitchStep`); the gradient crossfades; the Essentials grid stays (shared). Only Ctrl+Alt+←/→ and the footer switcher animate. TESTED (unit `Motion_*`, self-test `zen`; mid-slide frame checked on screen) |
+| Active tab press | `vertical-tabs.css` `scale: var(--zen-active-tab-scale)` | Mouse down on a tab | scale 0.98 | 0.1s ease | IMPLEMENTED (static inset while pressed; no transition) |
+| Tab indent change | `--zen-tabbox-element-indent-transition` | Folder membership | margin-inline-start | 0.1s ease-in-out | TESTED (`indent_anim_`, from the depth captured with the rows; self-test `zen`) |
+| Pinned separator | `.pinned-tabs-container-separator` | First pin / last unpin | height, opacity | 0.08s / 0.06s ease-in-out | TESTED (`pinned_sep_`; jumps on a space switch; self-test `zen`) |
+| Folder collapse/expand | `ZenFolders.animateCollapse/animateExpand` | Click folder | Height shift of members | 0.18s easeInOut (`#folderAnimationDuration`) | IMPLEMENTED: a row tween (`CaptureRows`/`AnimateRows`): staying rows glide, new rows fade in and grow, removed rows fade out in the closing gap; also used by the pinned-section fold. TESTED (self-test `zen` checks the tween starts; mid-collapse frame checked on screen) |
+| Workspace indicator actions | `zen-workspaces.css` `.zen-workspaces-actions` | Hover | opacity | 0.1s | IMPLEMENTED (fade of the ⋯ button; not checked frame by frame) |
+| Workspace footer icons | `#zen-workspaces-button toolbarbutton` | Hover/active | filter, opacity | 0.2s | IMPLEMENTED (hover background fades; not checked frame by frame) |
+| Floating URL bar | `zen-omnibox.css` | Open | appears with shadow | none in CSS for open | IMPLEMENTED (no animation, as reference) |
+| Glance open/close | `zen.glance.animation-duration=350` | Modifier-click | Arc from link to overlay | 350ms | TESTED (open and close arcs; `core::GlanceArcAt` unit-tested; self-test `zen`) |
+| Toast in / out | `ZenToasts.show` | Toast shown / timeout | scale 0→1 (spring, bounce 0.2) / opacity 1→0 + scale 1→0.5 | 0.5s / 0.2s; re-show from 0.2 | IMPLEMENTED (timer-driven, 15ms frames; checked on screen) |
+| Download arc | `zen.downloads.download-animation-duration=1000` | Download starts | Icon flies to the downloads button | 1000ms | TESTED (unit + self-test `zen`; not visually verified) |
+| Sidebar splitter highlight | `zen-browser-ui.css` `#zen-sidebar-splitter` | Hover the edge | opacity 0 → 0.8 after 0.2s delay | 0.2s | IMPLEMENTED (delay on show only; immediate while resizing; not checked frame by frame) |
+| Window controls reveal | `zen-browser-container.css` `transition: margin var(--zen-hidden-toolbar-transition)` | Pointer at top | Content margin | 0.15s ease-in-out | IMPLEMENTED (the page window glides down/up, move only; the buttons themselves appear at once; mid-frame not captured) |

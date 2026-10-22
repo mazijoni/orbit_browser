@@ -37,16 +37,19 @@ tools/            developer helpers (icon generator, window capture/click/close,
 
 | Keys | Action |
 |---|---|
-| Ctrl+L, Ctrl+K, Alt+D, F6 | Focus the address bar (floating when the sidebar's is hidden; F6 toggles between address bar and page) |
-| Ctrl+T / Ctrl+W | New tab (opens the floating URL bar) / close tab |
-| Ctrl+Shift+T | Reopen the last closed tab |
+| Ctrl+L, Ctrl+K, Alt+D, F6 | Open the floating URL bar for the current tab (clicking the sidebar field edits it in place; F6 toggles back to the page) |
+| Ctrl+T / Ctrl+W | New tab: the floating URL bar opens and Enter creates the tab (press Ctrl+T again or Escape to cancel) / close tab |
+| Ctrl+Shift+T | Reopen the last closed tab, or every tab of the last multi-tab close |
+| Ctrl+Shift+C | Copy the current URL |
+| Ctrl+Shift+K | Close all unpinned tabs in the space (keeps the selected tab and tabs playing media) |
+| Ctrl+Shift+D | Pin / unpin the current tab |
 | Ctrl+Tab, Ctrl+PgDn / Ctrl+Shift+Tab, Ctrl+PgUp | Next / previous tab |
 | Ctrl+1…8, Ctrl+9 | Go to tab *n* / the last tab |
-| Ctrl+Shift+PgDn / Ctrl+Shift+PgUp | Next / previous space. Scrolling sideways over the sidebar also switches spaces |
+| Ctrl+Alt+→ / Ctrl+Alt+← | Next / previous space, wrapping around (Zen). Scrolling sideways over the sidebar also switches spaces |
 | Ctrl+R, F5 / Ctrl+Shift+R, Shift+F5 | Reload / reload without cache |
 | Alt+Left / Alt+Right | Back / forward |
 | Ctrl+N / Ctrl+Shift+N | New window / new private window |
-| Ctrl+Shift+C | Compact mode (hide the sidebar; it slides in from the left edge) |
+| Ctrl+S | Compact mode (hide the sidebar; it slides in from the left edge), as in Zen |
 | Ctrl+Shift+S | Collapse the sidebar to icons |
 | Ctrl+Plus / Ctrl+Minus / Ctrl+0 | Zoom |
 | F11 | Full screen |
@@ -54,7 +57,7 @@ tools/            developer helpers (icon generator, window capture/click/close,
 | ↑ ↓ Home End Enter Del, Menu key | Navigate the sidebar when it has focus (← → collapse/expand a folder) |
 | Ctrl+D / Ctrl+H / Ctrl+J / Ctrl+Shift+O | Bookmark page / history / downloads / bookmarks |
 
-Ctrl+Alt combinations are never used as shortcuts, because Ctrl+Alt is AltGr on many keyboard layouts. Zen's own Ctrl+Alt shortcuts therefore map to Ctrl+Shift here.
+Ctrl+Alt is AltGr on many keyboard layouts, so Ctrl+Alt combinations are not used, with one exception: Zen's Ctrl+Alt+←/→, because AltGr+arrow types no character. Full shortcut parity status: [docs/zen-parity/KEYBOARD_SHORTCUTS.md](docs/zen-parity/KEYBOARD_SHORTCUTS.md).
 
 ## Credits
 

@@ -144,6 +144,7 @@ class InternalSchemeFactory : public CefSchemeHandlerFactory {
                       r.path.c_str(), describe(frame_url).c_str(), has_header ? 1 : 0);
     }
     r.trusted_action = r.same_page && r.method == L"POST";
+    r.browser_id = browser ? browser->GetIdentifier() : 0;
     return new InternalPageHandler(std::move(r));
   }
 

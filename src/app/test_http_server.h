@@ -13,6 +13,9 @@ namespace orbit::self_test {
 //   /file.bin                      1 MiB attachment
 //   /attack?target=<orbit url>    page that tries to reach a orbit:// API
 //   /audio                         page playing /tone.wav (title PLAYING once audible)
+//   /feed?items=a,b                RSS feed with those item ids (live folders)
+//   /gh/pulls, /gh/issues          GitHub-like pull request JSON / issue list HTML
+//   /gh/missing                    404 (a signed-out GitHub)
 class TestHttpServer {
  public:
   TestHttpServer() = default;

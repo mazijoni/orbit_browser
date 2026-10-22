@@ -35,6 +35,9 @@ struct InternalRequest {
   bool same_page = false;
   // same_page + POST + the X-Orbit-Action header. Required for state changes.
   bool trusted_action = false;
+  // The requesting browser (0 when unknown); the library's API acts on the
+  // window whose panel it is.
+  int browser_id = 0;
 };
 
 struct InternalResponse {

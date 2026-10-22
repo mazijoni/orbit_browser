@@ -3,6 +3,7 @@
 #include <unordered_map>
 
 #include "include/cef_client.h"
+#include "include/cef_context_menu_handler.h"
 
 namespace orbit {
 
@@ -22,7 +23,8 @@ class BrowserClient : public CefClient,
                       public CefFocusHandler,
                       public CefDownloadHandler,
                       public CefPermissionHandler,
-                      public CefJSDialogHandler {
+                      public CefJSDialogHandler,
+                      public CefContextMenuHandler {
  public:
   BrowserClient() = default;
 
@@ -39,6 +41,7 @@ class BrowserClient : public CefClient,
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
   CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
+  CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                                 CefProcessId source_process,
                                 CefRefPtr<CefProcessMessage> message) override;
@@ -71,6 +74,8 @@ class BrowserClient : public CefClient,
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool isLoading, bool canGoBack,
                             bool canGoForward) override;
 
+  void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                   TransitionType transition_type) override;
   void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                  int httpStatusCode) override;
   void OnLoadError(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
@@ -104,6 +109,9 @@ class BrowserClient : public CefClient,
   // CefKeyboardHandler
   bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
                      CefEventHandle os_event, bool* is_keyboard_shortcut) override;
+  // After the page: an Escape it did not handle closes a glance.
+  bool OnKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
+                  CefEventHandle os_event) override;
 
   // CefRequestHandler
   bool OnOpenURLFromTab(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
@@ -119,6 +127,14 @@ class BrowserClient : public CefClient,
   // CefResourceRequestHandler
   void OnProtocolExecution(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                            CefRefPtr<CefRequest> request, bool& allow_os_execution) override;
+
+  // CefContextMenuHandler: Zen's "Split Link to New Tab" (zen-split-link).
+  void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                           CefRefPtr<CefContextMenuParams> params,
+                           CefRefPtr<CefMenuModel> model) override;
+  bool OnContextMenuCommand(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                            CefRefPtr<CefContextMenuParams> params, int command_id,
+                            EventFlags event_flags) override;
 
   // CefFocusHandler
   bool OnSetFocus(CefRefPtr<CefBrowser> browser, FocusSource source) override;

@@ -23,6 +23,10 @@ TabRecord ReadTab(const Database::Statement& s) {
   t.group_id = s.ColumnIsNull(7) ? 0 : s.ColumnInt64(7);
   t.position = s.ColumnInt(8);
   t.last_active = s.ColumnInt64(9);
+  t.pinned_url = s.ColumnText(10);
+  t.custom_title = s.ColumnText(11);
+  t.live_item = s.ColumnText(12);
+  t.sublabel = s.ColumnText(13);
   return t;
 }
 
@@ -89,7 +93,7 @@ bool Store::DeleteProfile(int64_t id) {
 std::vector<WorkspaceRecord> Store::LoadWorkspaces(int64_t profile_id) {
   std::vector<WorkspaceRecord> out;
   auto s = db_.Prepare(
-      "SELECT id, profile_id, name, color, icon, position FROM workspaces "
+      "SELECT id, profile_id, name, color, icon, position, kind, theme FROM workspaces "
       "WHERE profile_id = ? ORDER BY position, id");
   s.Bind(1, profile_id);
   while (s.Step()) {
@@ -100,6 +104,8 @@ std::vector<WorkspaceRecord> Store::LoadWorkspaces(int64_t profile_id) {
     w.color = static_cast<uint32_t>(s.ColumnInt64(3));
     w.icon = s.ColumnText(4);
     w.position = s.ColumnInt(5);
+    w.kind = s.ColumnInt(6);
+    w.theme = s.ColumnText(7);
     out.push_back(std::move(w));
   }
   return out;
@@ -107,12 +113,12 @@ std::vector<WorkspaceRecord> Store::LoadWorkspaces(int64_t profile_id) {
 
 std::optional<WorkspaceRecord> Store::CreateWorkspace(int64_t profile_id,
                                                       const std::wstring& name, uint32_t color,
-                                                      const std::wstring& icon) {
+                                                      const std::wstring& icon, int kind) {
   auto s = db_.Prepare(
-      "INSERT INTO workspaces (profile_id, name, color, icon, position) VALUES (?, ?, ?, ?, "
-      "(SELECT COALESCE(MAX(position) + 1, 0) FROM workspaces WHERE profile_id = ?))");
+      "INSERT INTO workspaces (profile_id, name, color, icon, position, kind) VALUES (?, ?, ?, ?, "
+      "(SELECT COALESCE(MAX(position) + 1, 0) FROM workspaces WHERE profile_id = ?), ?)");
   s.Bind(1, profile_id).Bind(2, name).Bind(3, static_cast<int64_t>(color)).Bind(4, icon);
-  s.Bind(5, profile_id);
+  s.Bind(5, profile_id).Bind(6, kind);
   if (!s.Run()) return std::nullopt;
   const int64_t id = db_.LastInsertId();
   for (auto& w : LoadWorkspaces(profile_id)) {
@@ -123,9 +129,9 @@ std::optional<WorkspaceRecord> Store::CreateWorkspace(int64_t profile_id,
 
 bool Store::UpdateWorkspace(const WorkspaceRecord& w) {
   auto s = db_.Prepare(
-      "UPDATE workspaces SET name = ?, color = ?, icon = ?, position = ? WHERE id = ?");
+      "UPDATE workspaces SET name = ?, color = ?, icon = ?, position = ?, theme = ? WHERE id = ?");
   s.Bind(1, w.name).Bind(2, static_cast<int64_t>(w.color)).Bind(3, w.icon);
-  s.Bind(4, w.position).Bind(5, w.id);
+  s.Bind(4, w.position).Bind(5, w.theme).Bind(6, w.id);
   return s.Run();
 }
 
@@ -150,7 +156,9 @@ std::vector<TabRecord> Store::LoadTabs(int64_t workspace_id) {
   std::vector<TabRecord> out;
   auto s = db_.Prepare(
       "SELECT id, workspace_id, url, title, favicon_url, pinned, protected, group_id, "
-      "position, last_active FROM tabs WHERE workspace_id = ? ORDER BY position, id");
+      "position, last_active, pinned_url, custom_title, live_item, sublabel FROM tabs "
+      "WHERE workspace_id = ? "
+      "ORDER BY position, id");
   s.Bind(1, workspace_id);
   while (s.Step()) out.push_back(ReadTab(s));
   return out;
@@ -159,22 +167,26 @@ std::vector<TabRecord> Store::LoadTabs(int64_t workspace_id) {
 int64_t Store::InsertTab(const TabRecord& t) {
   auto s = db_.Prepare(
       "INSERT INTO tabs (workspace_id, url, title, favicon_url, pinned, protected, group_id, "
-      "position, last_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      "position, last_active, pinned_url, custom_title, live_item, sublabel) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   s.Bind(1, t.workspace_id).Bind(2, t.url).Bind(3, t.title).Bind(4, t.favicon_url);
   s.Bind(5, t.pinned).Bind(6, t.is_protected);
   BindGroup(s, 7, t.group_id);
-  s.Bind(8, t.position).Bind(9, t.last_active);
+  s.Bind(8, t.position).Bind(9, t.last_active).Bind(10, t.pinned_url).Bind(11, t.custom_title);
+  s.Bind(12, t.live_item).Bind(13, t.sublabel);
   return s.Run() ? db_.LastInsertId() : 0;
 }
 
 bool Store::UpdateTab(const TabRecord& t) {
   auto s = db_.Prepare(
       "UPDATE tabs SET workspace_id = ?, url = ?, title = ?, favicon_url = ?, pinned = ?, "
-      "protected = ?, group_id = ?, position = ?, last_active = ? WHERE id = ?");
+      "protected = ?, group_id = ?, position = ?, last_active = ?, pinned_url = ?, "
+      "custom_title = ?, live_item = ?, sublabel = ? WHERE id = ?");
   s.Bind(1, t.workspace_id).Bind(2, t.url).Bind(3, t.title).Bind(4, t.favicon_url);
   s.Bind(5, t.pinned).Bind(6, t.is_protected);
   BindGroup(s, 7, t.group_id);
-  s.Bind(8, t.position).Bind(9, t.last_active).Bind(10, t.id);
+  s.Bind(8, t.position).Bind(9, t.last_active).Bind(10, t.pinned_url).Bind(11, t.custom_title);
+  s.Bind(12, t.live_item).Bind(13, t.sublabel).Bind(14, t.id);
   return s.Run();
 }
 
@@ -198,8 +210,8 @@ bool Store::SetTabOrder(const std::vector<int64_t>& ids) {
 std::vector<TabGroupRecord> Store::LoadTabGroups(int64_t workspace_id) {
   std::vector<TabGroupRecord> out;
   auto s = db_.Prepare(
-      "SELECT id, workspace_id, name, color, collapsed FROM tab_groups WHERE workspace_id = ? "
-      "ORDER BY id");
+      "SELECT id, workspace_id, name, color, collapsed, parent_id, icon FROM tab_groups "
+      "WHERE workspace_id = ? ORDER BY id");
   s.Bind(1, workspace_id);
   while (s.Step()) {
     TabGroupRecord g;
@@ -208,6 +220,8 @@ std::vector<TabGroupRecord> Store::LoadTabGroups(int64_t workspace_id) {
     g.name = s.ColumnText(2);
     g.color = static_cast<uint32_t>(s.ColumnInt64(3));
     g.collapsed = s.ColumnBool(4);
+    g.parent_id = s.ColumnInt64(5);
+    g.icon = s.ColumnText(6);
     out.push_back(std::move(g));
   }
   return out;
@@ -215,17 +229,104 @@ std::vector<TabGroupRecord> Store::LoadTabGroups(int64_t workspace_id) {
 
 int64_t Store::InsertTabGroup(const TabGroupRecord& g) {
   auto s = db_.Prepare(
-      "INSERT INTO tab_groups (workspace_id, name, color, collapsed) VALUES (?, ?, ?, ?)");
+      "INSERT INTO tab_groups (workspace_id, name, color, collapsed, parent_id, icon) "
+      "VALUES (?, ?, ?, ?, ?, ?)");
   s.Bind(1, g.workspace_id).Bind(2, g.name).Bind(3, static_cast<int64_t>(g.color));
-  s.Bind(4, g.collapsed);
+  s.Bind(4, g.collapsed).Bind(5, g.parent_id).Bind(6, g.icon);
   return s.Run() ? db_.LastInsertId() : 0;
 }
 
 bool Store::UpdateTabGroup(const TabGroupRecord& g) {
   auto s = db_.Prepare(
-      "UPDATE tab_groups SET workspace_id = ?, name = ?, color = ?, collapsed = ? WHERE id = ?");
+      "UPDATE tab_groups SET workspace_id = ?, name = ?, color = ?, collapsed = ?, parent_id = ?, "
+      "icon = ? WHERE id = ?");
   s.Bind(1, g.workspace_id).Bind(2, g.name).Bind(3, static_cast<int64_t>(g.color));
-  s.Bind(4, g.collapsed).Bind(5, g.id);
+  s.Bind(4, g.collapsed).Bind(5, g.parent_id).Bind(6, g.icon).Bind(7, g.id);
+  return s.Run();
+}
+
+std::wstring Store::LoadBoost(int64_t profile_id, const std::wstring& domain) {
+  auto s = db_.Prepare("SELECT data FROM boosts WHERE profile_id = ? AND domain = ?");
+  s.Bind(1, profile_id).Bind(2, domain);
+  return s.Step() ? s.ColumnText(0) : std::wstring();
+}
+
+bool Store::SaveBoost(int64_t profile_id, const std::wstring& domain, const std::wstring& data) {
+  auto s = db_.Prepare("INSERT OR REPLACE INTO boosts (profile_id, domain, data) VALUES (?, ?, ?)");
+  s.Bind(1, profile_id).Bind(2, domain).Bind(3, data);
+  return s.Run();
+}
+
+bool Store::DeleteBoost(int64_t profile_id, const std::wstring& domain) {
+  auto s = db_.Prepare("DELETE FROM boosts WHERE profile_id = ? AND domain = ?");
+  s.Bind(1, profile_id).Bind(2, domain);
+  return s.Run();
+}
+
+std::vector<std::wstring> Store::BoostedDomains(int64_t profile_id) {
+  std::vector<std::wstring> out;
+  auto s = db_.Prepare("SELECT domain FROM boosts WHERE profile_id = ? ORDER BY domain");
+  s.Bind(1, profile_id);
+  while (s.Step()) out.push_back(s.ColumnText(0));
+  return out;
+}
+
+std::vector<LiveFolderRecord> Store::LoadLiveFolders() {
+  std::vector<LiveFolderRecord> out;
+  auto s = db_.Prepare("SELECT group_id, state, dismissed FROM live_folders ORDER BY group_id");
+  while (s.Step()) {
+    LiveFolderRecord r;
+    r.group_id = s.ColumnInt64(0);
+    r.state = s.ColumnText(1);
+    r.dismissed = s.ColumnText(2);
+    out.push_back(std::move(r));
+  }
+  return out;
+}
+
+bool Store::SaveLiveFolder(const LiveFolderRecord& r) {
+  auto s = db_.Prepare(
+      "INSERT OR REPLACE INTO live_folders (group_id, state, dismissed) VALUES (?, ?, ?)");
+  s.Bind(1, r.group_id).Bind(2, r.state).Bind(3, r.dismissed);
+  return s.Run();
+}
+
+bool Store::DeleteLiveFolder(int64_t group_id) {
+  auto s = db_.Prepare("DELETE FROM live_folders WHERE group_id = ?");
+  s.Bind(1, group_id);
+  return s.Run();
+}
+
+std::vector<SplitViewRecord> Store::LoadSplitViews(int64_t workspace_id) {
+  std::vector<SplitViewRecord> out;
+  auto s = db_.Prepare("SELECT id, workspace_id, layout FROM split_views WHERE workspace_id = ? "
+                       "ORDER BY id");
+  s.Bind(1, workspace_id);
+  while (s.Step()) {
+    SplitViewRecord r;
+    r.id = s.ColumnInt64(0);
+    r.workspace_id = s.ColumnInt64(1);
+    r.layout = s.ColumnText(2);
+    out.push_back(std::move(r));
+  }
+  return out;
+}
+
+int64_t Store::InsertSplitView(const SplitViewRecord& r) {
+  auto s = db_.Prepare("INSERT INTO split_views (workspace_id, layout) VALUES (?, ?)");
+  s.Bind(1, r.workspace_id).Bind(2, r.layout);
+  return s.Run() ? db_.LastInsertId() : 0;
+}
+
+bool Store::UpdateSplitView(const SplitViewRecord& r) {
+  auto s = db_.Prepare("UPDATE split_views SET workspace_id = ?, layout = ? WHERE id = ?");
+  s.Bind(1, r.workspace_id).Bind(2, r.layout).Bind(3, r.id);
+  return s.Run();
+}
+
+bool Store::DeleteSplitView(int64_t id) {
+  auto s = db_.Prepare("DELETE FROM split_views WHERE id = ?");
+  s.Bind(1, id);
   return s.Run();
 }
 
@@ -239,10 +340,10 @@ bool Store::DeleteTabGroup(int64_t id) {
 bool Store::PushClosedTab(const ClosedTabRecord& t) {
   Database::Transaction txn(db_);
   auto s = db_.Prepare(
-      "INSERT INTO closed_tabs (profile_id, workspace_id, url, title, closed_at) "
-      "VALUES (?, ?, ?, ?, ?)");
+      "INSERT INTO closed_tabs (profile_id, workspace_id, url, title, closed_at, batch_id) "
+      "VALUES (?, ?, ?, ?, ?, ?)");
   s.Bind(1, t.profile_id).Bind(2, t.workspace_id).Bind(3, t.url).Bind(4, t.title);
-  s.Bind(5, NowUnixMillis());
+  s.Bind(5, NowUnixMillis()).Bind(6, t.batch_id);
   auto trim = db_.Prepare(
       "DELETE FROM closed_tabs WHERE profile_id = ?1 AND id NOT IN (SELECT id FROM "
       "closed_tabs WHERE profile_id = ?1 ORDER BY closed_at DESC, id DESC LIMIT ?2)");
@@ -252,7 +353,7 @@ bool Store::PushClosedTab(const ClosedTabRecord& t) {
 
 std::optional<ClosedTabRecord> Store::PopClosedTab(int64_t profile_id) {
   auto s = db_.Prepare(
-      "SELECT id, profile_id, COALESCE(workspace_id, 0), url, title FROM closed_tabs "
+      "SELECT id, profile_id, COALESCE(workspace_id, 0), url, title, batch_id FROM closed_tabs "
       "WHERE profile_id = ? ORDER BY closed_at DESC, id DESC LIMIT 1");
   s.Bind(1, profile_id);
   if (!s.Step()) return std::nullopt;
@@ -262,10 +363,40 @@ std::optional<ClosedTabRecord> Store::PopClosedTab(int64_t profile_id) {
   t.workspace_id = s.ColumnInt64(2);
   t.url = s.ColumnText(3);
   t.title = s.ColumnText(4);
+  t.batch_id = s.ColumnInt64(5);
   auto del = db_.Prepare("DELETE FROM closed_tabs WHERE id = ?");
   del.Bind(1, t.id);
   if (!del.Run()) return std::nullopt;
   return t;
+}
+
+std::vector<ClosedTabRecord> Store::PopClosedTabBatch(int64_t profile_id) {
+  std::vector<ClosedTabRecord> out;
+  Database::Transaction txn(db_);
+  auto last = PopClosedTab(profile_id);
+  if (!last) return out;
+  if (last->batch_id != 0) {
+    auto s = db_.Prepare(
+        "SELECT id, profile_id, COALESCE(workspace_id, 0), url, title, batch_id FROM closed_tabs "
+        "WHERE profile_id = ? AND batch_id = ? ORDER BY closed_at, id");
+    s.Bind(1, profile_id).Bind(2, last->batch_id);
+    while (s.Step()) {
+      ClosedTabRecord t;
+      t.id = s.ColumnInt64(0);
+      t.profile_id = s.ColumnInt64(1);
+      t.workspace_id = s.ColumnInt64(2);
+      t.url = s.ColumnText(3);
+      t.title = s.ColumnText(4);
+      t.batch_id = s.ColumnInt64(5);
+      out.push_back(std::move(t));
+    }
+    auto del = db_.Prepare("DELETE FROM closed_tabs WHERE profile_id = ? AND batch_id = ?");
+    del.Bind(1, profile_id).Bind(2, last->batch_id);
+    if (!del.Run()) return {};
+  }
+  out.push_back(std::move(*last));
+  if (!txn.Commit()) return {};
+  return out;
 }
 
 std::vector<WindowRecord> Store::LoadWindows() {
@@ -323,6 +454,12 @@ bool Store::SetPref(int64_t scope, const std::wstring& key, const std::wstring& 
       "INSERT INTO prefs (scope, key, value) VALUES (?, ?, ?) "
       "ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value");
   s.Bind(1, scope).Bind(2, key).Bind(3, value);
+  return s.Run();
+}
+
+bool Store::DeletePref(int64_t scope, const std::wstring& key) {
+  auto s = db_.Prepare("DELETE FROM prefs WHERE scope = ? AND key = ?");
+  s.Bind(1, scope).Bind(2, key);
   return s.Run();
 }
 

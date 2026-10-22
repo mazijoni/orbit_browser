@@ -1,7 +1,30 @@
+# Build outputs (CMake presets build into out/<preset>)
 /out/
+/build/
+/dist/
+CMakeUserPresets.json
+
+# Third-party binaries, re-created by: pwsh ./scripts/fetch_deps.ps1
+# (third_party_build/ holds our own build files and IS tracked)
 /third_party/cef/
 /third_party/sqlite/
 /third_party/downloads/
-*.user
+
+# IDEs and editors
 .vs/
-/dist/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Logs, test leftovers, Python caches
+*.log
+selftest-*.txt
+__pycache__/
+*.pyc
+
+# OS / OneDrive files
+Thumbs.db
+desktop.ini
+*.tmp
+~$*
