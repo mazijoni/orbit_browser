@@ -7,16 +7,13 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
-#ifndef BuildId
-  #define BuildId "local"
-#endif
 #ifndef StageDir
   #define StageDir "..\dist\Orbit"
 #endif
 
 [Setup]
 AppId={{6C0F1B7E-2A4D-4C8E-9B61-0A1B17B20F51}
-AppName=Orbit
+AppName=Orbit Browser
 AppVersion={#AppVersion}
 AppPublisher=Orbit Project
 DefaultDirName={autopf}\Orbit
@@ -26,7 +23,7 @@ DisableReadyPage=yes
 PrivilegesRequired=lowest
 Uninstallable=no
 OutputDir=..\dist
-OutputBaseFilename=Orbit-{#AppVersion}-{#BuildId}-setup
+OutputBaseFilename=Orbit Browser Setup
 SetupIconFile=..\resources\orbit.ico
 Compression=lzma2/max
 SolidCompression=yes

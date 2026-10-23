@@ -283,6 +283,27 @@ bool HasToken(const std::wstring& command_line, const wchar_t* token) {
 
 }  // namespace
 
+bool IsDefaultBrowser() {
+  for (const wchar_t* scheme : {L"http", L"https"}) {
+    const std::wstring key = std::wstring(L"Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\") +
+                             scheme + L"\\UserChoice";
+    wchar_t progid[128] = {};
+    DWORD size = sizeof(progid);
+    if (::RegGetValueW(HKEY_CURRENT_USER, key.c_str(), L"ProgId", RRF_RT_REG_SZ, nullptr, progid, &size) !=
+            ERROR_SUCCESS ||
+        std::wstring(progid) != kProgId) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void MakeDefaultBrowser() {
+  Register(CurrentExe());
+  ::ShellExecuteW(nullptr, L"open", L"ms-settings:defaultapps?registeredAppUser=Orbit", nullptr, nullptr,
+                  SW_SHOWNORMAL);
+}
+
 std::filesystem::path InstallDirectory() {
   return KnownFolder(FOLDERID_UserProgramFiles) / L"Orbit";
 }

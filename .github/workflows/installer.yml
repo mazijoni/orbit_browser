@@ -35,15 +35,13 @@ jobs:
 
       - name: Build the installer
         shell: pwsh
-        env:
-          ORBIT_BUILD_ID: build${{ github.run_number }}
         run: ./scripts/make_installer.ps1
 
       - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
-          name: Orbit-setup
-          path: dist/Orbit-*-setup.exe
+          name: Orbit Browser
+          path: dist/Orbit Browser Setup.exe
           if-no-files-found: error
 
       - name: Attach to the release (tags only)
@@ -51,5 +49,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/Orbit-*-setup.exe
+            dist/Orbit Browser Setup.exe
             dist/Orbit-*-win64.zip

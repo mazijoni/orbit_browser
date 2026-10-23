@@ -21,4 +21,12 @@ std::optional<int> HandleCommandLine(const wchar_t* command_line);
 
 std::filesystem::path InstallDirectory();
 
+// True when Windows opens http(s) links with Orbit (the user's choice in
+// Default apps names Orbit's ProgID).
+bool IsDefaultBrowser();
+// Registers this copy of Orbit as a browser (so Windows lists it), then opens
+// Default apps on Orbit's entry: since Windows 10 only the user can pick the
+// default browser, so this is as far as an app may go.
+void MakeDefaultBrowser();
+
 }  // namespace orbit::installer

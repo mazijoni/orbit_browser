@@ -142,6 +142,11 @@ class Application {
   ExtensionBridge* FindExtensions(const Profile* profile) const;
   // The profile's extensions changed: its windows refresh their toolbar button.
   void OnExtensionsChanged(Profile* profile);
+  // The extensions pinned to the toolbar, in order (per profile).
+  std::vector<std::string> PinnedExtensions(const Profile* profile);
+  void SetExtensionPinned(Profile* profile, const std::string& id, bool pinned);
+  // An extension was just installed in |profile| (Orbit's toast replaces Chrome's bubble).
+  void OnExtensionAdded(Profile* profile, const std::string& name);
   // True once a profile's extensions directory holds an installed extension.
   static bool HasInstalledExtensions(const Profile& profile);
 

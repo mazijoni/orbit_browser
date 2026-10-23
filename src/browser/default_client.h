@@ -35,6 +35,7 @@ class DefaultClient : public CefClient,
   // page, or no window to put it in).
   bool Adopt(CefRefPtr<CefBrowser> browser, const std::string& url);
   std::set<int> adopted_;
+  std::set<int> closing_;
 
   IMPLEMENT_REFCOUNTING(DefaultClient);
 };

@@ -10,6 +10,7 @@
 #include <cwctype>
 
 #include "app/application.h"
+#include "app/installer.h"
 #include "app/resource.h"
 #include "browser/downloads.h"
 #include "browser/profile.h"
@@ -140,6 +141,7 @@ enum MenuId : UINT {
   kCmdHistory,
   kCmdDownloads,
   kCmdExtensions,
+  kCmdDefaultBrowser,
   kCmdSettings,
   kCmdClearTabs,
   kCmdNewTabGroup,
@@ -488,6 +490,7 @@ void BrowserWindow::ApplyTheme() {
   ::SendMessageW(address_, WM_SETFONT,
                  reinterpret_cast<WPARAM>(popup_visible_ ? popup_font_ : address_font_), TRUE);
   favicons_.clear();
+  ext_icons_.clear();
   popup_rt_.Reset();
   popup_brush_d2d_.Reset();
   RefreshBackdrop();
@@ -682,6 +685,8 @@ void BrowserWindow::Layout() {
   const bool visible = sw > 0.f;
 
   address_rect_ = site_info_ = star_ = copy_url_ = ext_btn_ = ws_actions_ = essentials_rect_ = linked_back_ = {};
+  ext_pin_rects_.clear();
+  ext_pin_ids_.clear();
   menu_ = toggle_ = back_ = forward_ = reload_ = ws_indicator_ = {};
   list_ = footer_ = downloads_ = create_new_ = panel_ = media_card_ = {};
   workspace_dots_.clear();
@@ -722,6 +727,12 @@ void BrowserWindow::Layout() {
       caption_min_ = {caption_max_.left - kCaptionButtonWidth, 0, caption_max_.left, kToolbarHeight};
       end = caption_min_.left - 4.f;
     }
+    // The extensions button and the pinned extensions sit at the left end
+    // (at most a third of the bar), before the centred group.
+    if (ExtensionsButtonShown()) {
+      start = LayoutExtensionButtons(start + 8.f, (kToolbarHeight - kButton) / 2.f,
+                                     start + (end - start) / 3.f) - 4.f;
+    }
     // One centred group: back, forward, reload, the URL field (at most 560
     // wide, or 800 with the "wide URL bar" setting), compact, menu.
     constexpr float kGap = 6.f;
@@ -746,11 +757,7 @@ void BrowserWindow::Layout() {
       if (!profile_->is_private()) {
         star_ = {address_rect_.right - 30, address_rect_.top + 5, address_rect_.right - 4, address_rect_.bottom - 5};
       }
-      float actions_left = star_.right > star_.left ? star_.left : address_rect_.right - 4;
-      if (ExtensionsButtonShown()) {
-        ext_btn_ = {actions_left - 26, address_rect_.top + 5, actions_left, address_rect_.bottom - 5};
-        actions_left = ext_btn_.left;
-      }
+      const float actions_left = star_.right > star_.left ? star_.left : address_rect_.right - 4;
       copy_url_ = {actions_left - 26, address_rect_.top + 5, actions_left, address_rect_.bottom - 5};
     }
   }
@@ -780,6 +787,8 @@ void BrowserWindow::Layout() {
         reload_ = {r - kButton, by, r, by + kButton};
         forward_ = {reload_.left - 1 - kButton, by, reload_.left - 1, by + kButton};
         back_ = {forward_.left - 1 - kButton, by, forward_.left - 1, by + kButton};
+        // The extensions button and the pinned extensions, after the toggle.
+        if (ExtensionsButtonShown()) ext_btn_ = {toggle_.right + 1, by, toggle_.right + 1 + kButton, by + kButton};
         y = kTopRowHeight;
         // Address bar.
         address_rect_ = {l, y, r, y + kUrlBarHeight};
@@ -791,13 +800,11 @@ void BrowserWindow::Layout() {
         }
         // zen.urlbar.single-toolbar-show-copy-url: a copy button among the
         // page actions, hidden for pages that are not http(s).
-        float actions_left = star_.right > star_.left ? star_.left : address_rect_.right - 4;
-        if (ExtensionsButtonShown()) {
-          ext_btn_ = {actions_left - 26, address_rect_.top + 5, actions_left, address_rect_.bottom - 5};
-          actions_left = ext_btn_.left;
-        }
+        const float actions_left = star_.right > star_.left ? star_.left : address_rect_.right - 4;
         copy_url_ = {actions_left - 26, address_rect_.top + 5, actions_left, address_rect_.bottom - 5};
         y = address_rect_.bottom + 4;
+        // Pinned extensions: the top row has no room, so a slim row of their own.
+        if (ExtensionsButtonShown() && LayoutPinnedExtensions(l, y, r) > l) y += kButton + 4;
       }
       // #zen-essentials: the space's grid of icon tiles.
       essentials_rect_ = {};
@@ -856,6 +863,7 @@ void BrowserWindow::Layout() {
       if (!multi_toolbar()) {
         next(menu_);
         next(toggle_);
+        if (ExtensionsButtonShown()) next(ext_btn_);
         next(back_);
         next(forward_);
         next(reload_);
@@ -903,6 +911,12 @@ void BrowserWindow::Layout() {
     for (auto& dot : workspace_dots_) {
       dot.left += dx;
       dot.right += dx;
+    }
+    if (!multi_toolbar()) {
+      for (auto& pin : ext_pin_rects_) {
+        pin.left += dx;
+        pin.right += dx;
+      }
     }
   }
   UpdateOverlay();
@@ -1353,6 +1367,9 @@ BrowserWindow::Hit BrowserWindow::HitTest(float x, float y) const {
     if (ui::Contains(site_info_, x, y)) return {HitKind::kSiteInfo, 0};
     if (ui::Contains(star_, x, y)) return {HitKind::kStar, 0};
     if (ui::Contains(ext_btn_, x, y)) return {HitKind::kExtensions, 0};
+    for (size_t i = 0; i < ext_pin_rects_.size(); ++i) {
+      if (ui::Contains(ext_pin_rects_[i], x, y)) return {HitKind::kExtensionPin, static_cast<int>(i)};
+    }
     if (CanCopyUrlFromButton() && ui::Contains(copy_url_, x, y)) return {HitKind::kCopyUrl, 0};
     return {};  // the rest of the toolbar drags the window
   }
@@ -1369,6 +1386,9 @@ BrowserWindow::Hit BrowserWindow::HitTest(float x, float y) const {
   if (ui::Contains(site_info_, x, y)) return {HitKind::kSiteInfo, 0};
   if (ui::Contains(star_, x, y)) return {HitKind::kStar, 0};
   if (ui::Contains(ext_btn_, x, y)) return {HitKind::kExtensions, 0};
+  for (size_t i = 0; i < ext_pin_rects_.size(); ++i) {
+    if (ui::Contains(ext_pin_rects_[i], x, y)) return {HitKind::kExtensionPin, static_cast<int>(i)};
+  }
   if (CanCopyUrlFromButton() && ui::Contains(copy_url_, x, y)) return {HitKind::kCopyUrl, 0};
   if (ui::Contains(essentials_rect_, x, y)) {
     const auto rects = EssentialRects();
@@ -2523,6 +2543,7 @@ void BrowserWindow::BeginSpaceSwitchAnimation(int step) {
     brush_.Swap(overlay_brush_);
     favicons_.swap(overlay_favicons_);
     pinned_favicons_.swap(overlay_pinned_favicons_);
+    ext_icons_.swap(overlay_ext_icons_);
   };
   if (on_overlay) lend_overlay_resources();
   // A compatible target shares the device, so brush_ and the favicon bitmaps
@@ -4808,6 +4829,7 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
       overlay_brush_.Reset();
       overlay_favicons_.clear();
       overlay_pinned_favicons_.clear();
+    overlay_ext_icons_.clear();
       overlay_size_ = {};
       grain_brush_.Reset();
       grain_rt_ = nullptr;
@@ -5527,6 +5549,12 @@ void BrowserWindow::Click(const Hit& hit) {
       break;
     case HitKind::kExtensions:
       ShowExtensionsMenu();
+      break;
+    case HitKind::kExtensionPin:
+      if (const ExtensionInfo* e = PinnedExtension(hit.index)) {
+        const ExtensionInfo chosen = *e;
+        OpenExtensionAction(chosen, ext_pin_rects_[static_cast<size_t>(hit.index)]);
+      }
       break;
     case HitKind::kMenu:
       ShowMainMenu(anchor(menu_));
@@ -6704,6 +6732,9 @@ void BrowserWindow::ShowMainMenu(POINT pt) {
   if (!profile_->is_private()) {
     ::AppendMenuW(menu, MF_STRING, kCmdExtensions, MenuLabel(L"Extensions", L"extensions").c_str());
   }
+  if (!installer::IsDefaultBrowser()) {
+    ::AppendMenuW(menu, MF_STRING, kCmdDefaultBrowser, L"Make Orbit the default browser");
+  }
   std::wstring profiles = L"Profile: " + profile_->record().name + L"…";
   ::AppendMenuW(menu, MF_STRING, kCmdProfiles, profiles.c_str());
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -6759,6 +6790,9 @@ void BrowserWindow::ShowMainMenu(POINT pt) {
       break;
     case kCmdExtensions:
       OpenInternalPage(kPageExtensions);
+      break;
+    case kCmdDefaultBrowser:
+      installer::MakeDefaultBrowser();
       break;
     case kCmdSettings:
       OpenInternalPage(kPageSettings);
@@ -6869,6 +6903,9 @@ void BrowserWindow::UpdateTooltip(const Hit& hit) {
     case HitKind::kStar: r = star_; break;
     case HitKind::kCopyUrl: r = copy_url_; break;
     case HitKind::kExtensions: r = ext_btn_; break;
+    case HitKind::kExtensionPin:
+      if (hit.index >= 0 && hit.index < static_cast<int>(ext_pin_rects_.size())) r = ext_pin_rects_[hit.index];
+      break;
     case HitKind::kMenu: r = menu_; break;
     case HitKind::kSidebarToggle: r = toggle_; break;
     case HitKind::kWorkspaceIndicator: r = ws_indicator_; break;
@@ -6930,6 +6967,10 @@ std::wstring BrowserWindow::TooltipText() const {
     case HitKind::kStar: return bookmarked_ ? L"Remove bookmark (Ctrl+D)" : L"Bookmark this page (Ctrl+D)";
     case HitKind::kCopyUrl: return L"Copy URL (Ctrl+Shift+C)";
     case HitKind::kExtensions: return L"Extensions";
+    case HitKind::kExtensionPin: {
+      const ExtensionInfo* e = PinnedExtension(tooltip_hit_.index);
+      return e ? FromUtf8(e->action_title.empty() ? e->name : e->action_title) : std::wstring();
+    }
     case HitKind::kMenu: return L"Menu";
     case HitKind::kSidebarToggle:
       return compact_mode_ ? L"Turn off compact mode (Ctrl+S)"
@@ -7338,13 +7379,8 @@ void BrowserWindow::ShowToast(ui::Toast::Content content) {
 }
 
 bool BrowserWindow::ExtensionsButtonShown() const {
-  if (profile_->is_private() || chrome_hidden()) return false;
-  const ExtensionBridge* bridge = Application::Get()->FindExtensions(profile_);
-  if (!bridge) return false;
-  for (const ExtensionInfo& e : bridge->extensions()) {
-    if (e.enabled) return true;
-  }
-  return false;
+  // Always there in a normal window, so extensions can be found and added.
+  return !profile_->is_private() && !chrome_hidden();
 }
 
 void BrowserWindow::OnExtensionsChanged() {
@@ -7352,38 +7388,101 @@ void BrowserWindow::OnExtensionsChanged() {
   Invalidate();
 }
 
-// The extensions button: Orbit's own menu of the extensions that have an
-// action popup, the Extensions page, and the Web Store.
+float BrowserWindow::LayoutExtensionButtons(float x, float y, float limit) {
+  ext_btn_ = {x, y, x + kButton, y + kButton};
+  return LayoutPinnedExtensions(ext_btn_.right + 1.f, y, limit);
+}
+
+float BrowserWindow::LayoutPinnedExtensions(float x, float y, float limit) {
+  const ExtensionBridge* bridge = Application::Get()->FindExtensions(profile_);
+  if (!bridge) return x;
+  for (const std::string& id : Application::Get()->PinnedExtensions(profile_)) {
+    const auto it = std::find_if(bridge->extensions().begin(), bridge->extensions().end(),
+                                 [&](const ExtensionInfo& e) { return e.id == id && e.enabled; });
+    if (it == bridge->extensions().end()) continue;  // removed or turned off
+    if (x + kButton > limit) break;                   // the rest stay in the menu
+    ext_pin_rects_.push_back({x, y, x + kButton, y + kButton});
+    ext_pin_ids_.push_back(id);
+    x += kButton + 1.f;
+  }
+  return x;
+}
+
+const ExtensionInfo* BrowserWindow::PinnedExtension(int index) const {
+  if (index < 0 || index >= static_cast<int>(ext_pin_ids_.size())) return nullptr;
+  const ExtensionBridge* bridge = Application::Get()->FindExtensions(profile_);
+  if (!bridge) return nullptr;
+  for (const ExtensionInfo& e : bridge->extensions()) {
+    if (e.id == ext_pin_ids_[static_cast<size_t>(index)]) return &e;
+  }
+  return nullptr;
+}
+
+void BrowserWindow::OpenExtensionAction(const ExtensionInfo& extension, const D2D1_RECT_F& anchor) {
+  if (extension.popup.empty()) {
+    // Without a popup Chrome would send the extension a click Orbit cannot
+    // deliver; its options are the next best thing.
+    if (!extension.options_url.empty()) {
+      OpenTab(FromUtf8(extension.options_url), true);
+    } else {
+      ui::Toast::Content content;
+      content.id = L"extension-no-popup";
+      content.text = FromUtf8(extension.name) + L" has no menu here";
+      ShowToast(content);
+    }
+    return;
+  }
+  POINT below{static_cast<LONG>(px(anchor.left)), static_cast<LONG>(px(anchor.bottom + 6))};
+  ::ClientToScreen(hwnd_, &below);
+  ExtensionPopup::Open(this, extension, below);
+}
+
+// The extensions button: Orbit's own menu of the installed extensions (open
+// one's popup), pinning them to the top bar, the Extensions page and the
+// Web Store.
 void BrowserWindow::ShowExtensionsMenu() {
   Application* app = Application::Get();
-  const ExtensionBridge* bridge = app->FindExtensions(profile_);
-  if (!bridge) return;
-  constexpr UINT kFirst = 100, kManage = 90, kStore = 91;
+  const ExtensionBridge* bridge = app->Extensions(profile_);  // starts it if needed
+  constexpr UINT kFirst = 100, kPinFirst = 400, kManage = 90, kStore = 91;
   HMENU menu = ::CreatePopupMenu();
-  std::vector<const ExtensionInfo*> shown;
-  for (const ExtensionInfo& e : bridge->extensions()) {
-    if (!e.enabled || e.popup.empty()) continue;
-    shown.push_back(&e);
-    ::AppendMenuW(menu, MF_STRING, kFirst + static_cast<UINT>(shown.size() - 1), FromUtf8(e.name).c_str());
+  HMENU pins = ::CreatePopupMenu();
+  std::vector<ExtensionInfo> shown;
+  const std::vector<std::string> pinned = app->PinnedExtensions(profile_);
+  if (bridge) {
+    for (const ExtensionInfo& e : bridge->extensions()) {
+      if (!e.enabled) continue;
+      shown.push_back(e);
+      const UINT i = static_cast<UINT>(shown.size() - 1);
+      ::AppendMenuW(menu, MF_STRING, kFirst + i, FromUtf8(e.name).c_str());
+      const bool is_pinned = std::find(pinned.begin(), pinned.end(), e.id) != pinned.end();
+      ::AppendMenuW(pins, MF_STRING | (is_pinned ? MF_CHECKED : 0), kPinFirst + i, FromUtf8(e.name).c_str());
+    }
   }
-  if (!shown.empty()) ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  if (shown.empty()) {
+    ::AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"No extensions yet");
+  } else {
+    ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pins), L"Pin to toolbar");
+  }
+  ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   ::AppendMenuW(menu, MF_STRING, kManage, L"Manage extensions");
   ::AppendMenuW(menu, MF_STRING, kStore, L"Get extensions");
   POINT at{static_cast<LONG>(px(ext_btn_.left)), static_cast<LONG>(px(ext_btn_.bottom + 2))};
   ::ClientToScreen(hwnd_, &at);
   const UINT cmd = static_cast<UINT>(
       ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, at.x, at.y, hwnd_, palette_));
-  ::DestroyMenu(menu);
+  if (shown.empty()) ::DestroyMenu(pins);
+  ::DestroyMenu(menu);  // with the submenu
   if (cmd == kManage) {
     OpenInternalPage(kPageExtensions);
   } else if (cmd == kStore) {
     OpenTab(L"https://chromewebstore.google.com/category/extensions", true);
+  } else if (cmd >= kPinFirst && cmd - kPinFirst < shown.size()) {
+    const ExtensionInfo& e = shown[cmd - kPinFirst];
+    const bool is_pinned = std::find(pinned.begin(), pinned.end(), e.id) != pinned.end();
+    app->SetExtensionPinned(profile_, e.id, !is_pinned);
   } else if (cmd >= kFirst && cmd - kFirst < shown.size()) {
-    // The popup opens under the button.
-    POINT below{static_cast<LONG>(px(ext_btn_.left)), static_cast<LONG>(px(ext_btn_.bottom + 6))};
-    ::ClientToScreen(hwnd_, &below);
-    ExtensionInfo chosen = *shown[cmd - kFirst];
-    ExtensionPopup::Open(this, chosen, below);
+    OpenExtensionAction(shown[cmd - kFirst], ext_btn_);
   }
 }
 
@@ -7526,6 +7625,11 @@ std::vector<AccessibleItem> BrowserWindow::AccessibleItems() const {
       star_);
   if (CanCopyUrlFromButton()) add(HitKind::kCopyUrl, 0, Role::kButton, L"Copy URL", copy_url_);
   if (ext_btn_.right > ext_btn_.left) add(HitKind::kExtensions, 0, Role::kButton, L"Extensions", ext_btn_);
+  for (size_t i = 0; i < ext_pin_rects_.size(); ++i) {
+    if (const ExtensionInfo* e = PinnedExtension(static_cast<int>(i))) {
+      add(HitKind::kExtensionPin, static_cast<int>(i), Role::kButton, FromUtf8(e->name), ext_pin_rects_[i]);
+    }
+  }
   if (workspace_) {
     const bool linked = workspace_->is_linked() && workspace_->parent();
     add(HitKind::kWorkspaceIndicator, 0, Role::kButton,
@@ -7832,6 +7936,7 @@ void BrowserWindow::PaintOverlay() {
     overlay_rt_->CreateSolidColorBrush(palette_.text, &overlay_brush_);
     overlay_favicons_.clear();
     overlay_pinned_favicons_.clear();
+    overlay_ext_icons_.clear();
   }
   // PaintSidebar and the favicon caches use rt_/brush_: lend them the
   // overlay's resources for this frame.
@@ -7839,6 +7944,7 @@ void BrowserWindow::PaintOverlay() {
   brush_.Swap(overlay_brush_);
   favicons_.swap(overlay_favicons_);
   pinned_favicons_.swap(overlay_pinned_favicons_);
+    ext_icons_.swap(overlay_ext_icons_);
   ID2D1RenderTarget* rt = rt_.Get();
   rt->BeginDraw();
   rt->SetTransform(D2D1::Matrix3x2F::Translation(-panel_.left, -panel_.top));
@@ -7850,11 +7956,13 @@ void BrowserWindow::PaintOverlay() {
   brush_.Swap(overlay_brush_);
   favicons_.swap(overlay_favicons_);
   pinned_favicons_.swap(overlay_pinned_favicons_);
+    ext_icons_.swap(overlay_ext_icons_);
   if (hr == D2DERR_RECREATE_TARGET) {
     overlay_rt_.Reset();
     overlay_brush_.Reset();
     overlay_favicons_.clear();
     overlay_pinned_favicons_.clear();
+    overlay_ext_icons_.clear();
     space_snapshot_.Reset();
     ::InvalidateRect(overlay_, nullptr, FALSE);
   }

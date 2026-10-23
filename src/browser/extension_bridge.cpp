@@ -8,7 +8,9 @@
 #include "app/application.h"
 #include "browser/profile.h"
 #include "browser/tab.h"
+#include "core/crypto.h"
 #include "core/json.h"
+#include "include/cef_image.h"
 #include "core/log.h"
 #include "core/strings.h"
 #include "ui/browser_window.h"
@@ -84,6 +86,27 @@ std::string ReadFile(const std::filesystem::path& path) {
   std::ostringstream ss;
   ss << in.rdbuf();
   return ss.str();
+}
+
+// A "data:image/png;base64,..." icon as premultiplied BGRA (the toolbar's).
+FaviconPixels DecodeIcon(const std::string& data_url) {
+  static uint32_t generation = 0;
+  FaviconPixels out;
+  constexpr char kPng[] = "data:image/png;base64,";
+  if (data_url.rfind(kPng, 0) != 0) return out;
+  const auto png = crypto::Base64Decode(std::string_view(data_url).substr(sizeof(kPng) - 1));
+  if (!png || png->empty()) return out;
+  CefRefPtr<CefImage> image = CefImage::CreateImage();
+  if (!image->AddPNG(1.0f, png->data(), png->size())) return out;
+  int w = 0, h = 0;
+  CefRefPtr<CefBinaryValue> bgra = image->GetAsBitmap(1.0f, CEF_COLOR_TYPE_BGRA_8888, CEF_ALPHA_TYPE_PREMULTIPLIED, w, h);
+  if (!bgra || w <= 0 || h <= 0 || bgra->GetSize() < static_cast<size_t>(w) * h * 4) return out;
+  out.width = w;
+  out.height = h;
+  out.bgra.resize(static_cast<size_t>(w) * h * 4);
+  bgra->GetData(out.bgra.data(), out.bgra.size(), 0);
+  out.generation = ++generation;
+  return out;
 }
 
 // The extension's installed directory: <profile>/Extensions/<id>/<version>_<n>.
@@ -279,6 +302,11 @@ void ExtensionBridge::HandleMessage(const std::string& kind, const std::string& 
     info.description = e.Str("description");
     info.location = e.Str("location");
     info.icon = e.Str("icon");
+    // The previous decode is kept when the icon did not change.
+    for (const ExtensionInfo& old : extensions_) {
+      if (old.id == info.id && old.icon == info.icon) info.icon_pixels = old.icon_pixels;
+    }
+    if (info.icon_pixels.bgra.empty()) info.icon_pixels = DecodeIcon(info.icon);
     info.options_url = e.Str("options");
     info.home_url = e.Str("home");
     info.enabled = e.Str("state") == "ENABLED";
@@ -292,8 +320,21 @@ void ExtensionBridge::HandleMessage(const std::string& kind, const std::string& 
     list.push_back(std::move(info));
   }
   std::sort(list.begin(), list.end(), [](const ExtensionInfo& a, const ExtensionInfo& b) { return a.name < b.name; });
+  // A new extension (installed from the Web Store just now): Orbit says so,
+  // instead of Chrome's own bubble.
+  std::vector<std::string> added;
+  if (listed_once_) {
+    for (const ExtensionInfo& e : list) {
+      const bool known = std::any_of(extensions_.begin(), extensions_.end(), [&](const ExtensionInfo& x) { return x.id == e.id; });
+      if (!known) added.push_back(e.name);
+    }
+  }
+  listed_once_ = true;
   extensions_ = std::move(list);
   ++revision_;
+  for (const std::string& name : added) {
+    if (Application* app = Application::Get()) app->OnExtensionAdded(profile_, name);
+  }
   if (Application* app = Application::Get()) app->OnExtensionsChanged(profile_);
 }
 

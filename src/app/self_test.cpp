@@ -3361,6 +3361,44 @@ void AddExtensionsSuite(Runner& r) {
     r.Check(t == L"EXT:ExtBack:api", "the content script ran after re-enabling (" + N(t) + ")");
     return true;
   }, 15000);
+  r.Add("the extensions button sits on the left of the top bar", [s, &r] {
+    s->window->ForceLayoutForTest();
+    const D2D1_RECT_F ext = s->window->extensions_button_rect();
+    r.Check(ext.right > ext.left, "shown");
+    r.Check(ext.right <= s->window->back_button_rect().left, "left of back / forward / reload");
+    r.Check(s->window->pinned_extension_ids().empty(), "nothing pinned yet");
+  });
+  r.Add("pinning puts the extension next to it, unpinning takes it away", [s, app, &r] {
+    app->SetExtensionPinned(s->profile, s->id, true);
+    const auto pins = s->window->pinned_extension_ids();
+    r.Check(pins.size() == 1 && pins[0] == s->id, "pinned");
+    r.Check(app->PinnedExtensions(s->profile) == std::vector<std::string>{s->id}, "stored for the profile");
+  }, [] {
+    static ULONGLONG t0 = ::GetTickCount64();
+    const wchar_t* hold = ::_wgetenv(L"ORBIT_TEST_HOLD");  // a moment to look at it
+    return !hold || ::GetTickCount64() - t0 > 8000;
+  }, 15000);
+  r.Add("with multiple toolbars they lead the top bar", [s, app, &r] {
+    app->store().SetPref(Store::kGlobalScope, L"single_toolbar", L"0");
+    app->ApplyThemeToAllWindows();
+    s->window->ForceLayoutForTest();
+    const D2D1_RECT_F ext = s->window->extensions_button_rect();
+    const D2D1_RECT_F bar = s->window->toolbar_rect();
+    r.Check(ext.top >= bar.top && ext.bottom <= bar.bottom && ext.right <= s->window->back_button_rect().left,
+            "in the toolbar, left of back");
+    r.Check(s->window->pinned_extension_ids().size() == 1, "the pinned extension beside it");
+  }, [] {
+    static ULONGLONG t0 = ::GetTickCount64();
+    return !::_wgetenv(L"ORBIT_TEST_HOLD") || ::GetTickCount64() - t0 > 8000;
+  }, 15000);
+  r.Add("... back to one toolbar", [app] {
+    app->store().SetPref(Store::kGlobalScope, L"single_toolbar", L"1");
+    app->ApplyThemeToAllWindows();
+  });
+  r.Add("... and off again", [s, app, &r] {
+    app->SetExtensionPinned(s->profile, s->id, false);
+    r.Check(s->window->pinned_extension_ids().empty(), "unpinned");
+  });
   r.Add("its action popup opens and runs", [s, &r, fixture] {
     const ExtensionInfo* e = fixture();
     r.Check(e && e->popup == "popup.html", "the bridge found the popup path");
@@ -3435,6 +3473,96 @@ void AddExtensionsSuite(Runner& r) {
 }
 
 
+
+// TEMPORARY (needs the internet): a real Chrome Web Store install, logging
+// every window that shows up afterwards.
+std::string DescribeWindows() {
+  struct Ctx { DWORD pid; std::string out; };
+  Ctx ctx{::GetCurrentProcessId(), {}};
+  ::EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+    auto* c = reinterpret_cast<Ctx*>(lp);
+    DWORD pid = 0;
+    ::GetWindowThreadProcessId(h, &pid);
+    if (pid != c->pid || !::IsWindowVisible(h)) return TRUE;
+    wchar_t cls[64] = {}, title[128] = {};
+    ::GetClassNameW(h, cls, 64);
+    ::GetWindowTextW(h, title, 128);
+    RECT r;
+    ::GetWindowRect(h, &r);
+    c->out += "[" + N(cls) + " '" + N(title) + "' " + std::to_string(r.right - r.left) + "x" +
+              std::to_string(r.bottom - r.top) + " @" + std::to_string(r.left) + "," + std::to_string(r.top) + (::GetWindow(h, GW_OWNER) ? " owned" : "") + "] ";
+    return TRUE;
+  }, reinterpret_cast<LPARAM>(&ctx));
+  return ctx.out;
+}
+
+void AddStoreInstallSuite(Runner& r) {
+  struct State {
+    BrowserWindow* window = nullptr;
+    Tab* tab = nullptr;
+    int stage = 0;
+    ULONGLONG t0 = 0;
+    std::string last;
+  };
+  auto s = std::make_shared<State>();
+  r.Add("open the store", [s] {
+    s->window = FirstWindowOf(Application::Get()->profiles().front().get());
+    s->tab = s->window->OpenTab(L"https://chromewebstore.google.com/detail/ublock-origin-lite/ddkjiahejlhfcafbddmgiahcphecmpfh", true);
+  }, [s, &r] {
+    if (!s->tab->browser() || s->tab->loading()) return false;
+    const std::wstring url = s->tab->url();
+    CefRefPtr<CefFrame> f = s->tab->browser()->GetMainFrame();
+    if (url.find(L"consent.google") != std::wstring::npos) {
+      f->ExecuteJavaScript("[...document.querySelectorAll('button')].find(b=>/Reject all|Accept all/.test(b.innerText))?.click()", "", 0);
+      return false;
+    }
+    if (url.find(L"chromewebstore.google.com") == std::wstring::npos) return false;
+    static ULONGLONG asked = 0;
+    if (!asked || ::GetTickCount64() - asked > 2000) {
+      asked = ::GetTickCount64();
+      f->ExecuteJavaScript(
+          "{const b=[...document.querySelectorAll('button')].find(b=>/Add to (Orbit|Chrome)/.test(b.innerText));"
+          "document.title='BTN:'+(b?b.innerText.trim():'none');if(b)b.click();}", "", 0);
+    }
+    const std::wstring& t = s->tab->record().title;
+    if (t.rfind(L"BTN:Add", 0) != 0) return false;
+    r.Log("  info clicked " + N(t));
+    return true;
+  }, 60000);
+  r.Add("accept Chrome's install dialog", [] {}, [s, &r] {
+    // The dialog: a small Chrome_WidgetWin_1 of this process.
+    struct Find { DWORD pid; HWND dlg; };
+    Find f{::GetCurrentProcessId(), nullptr};
+    ::EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+      auto* c = reinterpret_cast<Find*>(lp);
+      DWORD pid = 0;
+      ::GetWindowThreadProcessId(h, &pid);
+      wchar_t cls[64] = {};
+      ::GetClassNameW(h, cls, 64);
+      RECT rc;
+      ::GetWindowRect(h, &rc);
+      const int w = rc.right - rc.left, hh = rc.bottom - rc.top;
+      if (pid == c->pid && ::IsWindowVisible(h) && std::wstring(cls) == L"Chrome_WidgetWin_1" && w > 250 && w < 700 &&
+          hh > 100 && hh < 450) {
+        c->dlg = h;
+        return FALSE;
+      }
+      return TRUE;
+    }, reinterpret_cast<LPARAM>(&f));
+    if (!f.dlg) return false;
+    r.Log("  info dialog " + DescribeWindows());
+    // Accepted from outside through UI Automation (no mouse).
+    return true;
+  }, 30000);
+  r.Add("watch the windows for 40 s", [s] { s->t0 = ::GetTickCount64(); }, [s, &r] {
+    const std::string now = DescribeWindows() + " toast=" + N(s->window->visible_toast_id());
+    if (now != s->last) {
+      s->last = now;
+      r.Log("  info +" + std::to_string((::GetTickCount64() - s->t0) / 100) + "ds " + now);
+    }
+    return ::GetTickCount64() - s->t0 > 40000;
+  }, 50000);
+}
 }  // namespace
 
 bool IsActive() { return g_active; }
@@ -3519,6 +3647,8 @@ void Start(const std::wstring& suite) {
     AddZenSuite(*g_runner);
   } else if (suite == L"extensions") {
     AddExtensionsSuite(*g_runner);
+  } else if (suite == L"store-install") {
+    AddStoreInstallSuite(*g_runner);
   } else {
     g_runner->Check(false, "unknown suite " + N(suite));
   }

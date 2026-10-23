@@ -12,6 +12,7 @@
 #include <map>
 
 #include "app/application.h"
+#include "app/installer.h"
 #include "browser/browser_client.h"
 #include "browser/downloads.h"
 #include "browser/extension_bridge.h"
@@ -463,9 +464,14 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
     d->SetString("profile", profile->record().name);
     d->SetBool("private", profile->is_private());
     d->SetString("version", ORBIT_VERSION);
+    d->SetBool("defaultBrowser", installer::IsDefaultBrowser());
     d->SetString("engine", CEF_VERSION);
     d->SetString("dataDir", profile->is_private() ? L"(in memory)" : profile->data_dir().wstring());
     return Json(d);
+  }
+  if (api == L"default-browser" && req.trusted_action) {
+    installer::MakeDefaultBrowser();
+    return Ok();
   }
   if (api == L"routes") {
     CefRefPtr<CefListValue> routes = CefListValue::Create();
@@ -1328,8 +1334,7 @@ InternalResponse WelcomeApi(const InternalRequest& req, Profile* profile) {
     return Ok();
   }
   if (api == L"default-browser") {
-    ::ShellExecuteW(nullptr, L"open", L"ms-settings:defaultapps?registeredAppUser=Orbit", nullptr,
-                    nullptr, SW_SHOWNORMAL);
+    installer::MakeDefaultBrowser();
     return Ok();
   }
   if (api == L"done") {

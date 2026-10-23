@@ -933,6 +933,44 @@ ExtensionBridge* Application::FindExtensions(const Profile* profile) const {
   return nullptr;
 }
 
+void Application::OnExtensionAdded(Profile* profile, const std::string& name) {
+  for (const auto& w : windows_) {
+    if (w->profile() != profile || w->closing()) continue;
+    ui::Toast::Content content;
+    content.id = L"extension-added";
+    content.text = FromUtf8(name) + L" was added to Orbit";
+    content.timeout_ms = 4000;
+    w->ShowToast(content);
+    break;
+  }
+}
+
+std::vector<std::string> Application::PinnedExtensions(const Profile* profile) {
+  std::vector<std::string> out;
+  if (!profile || profile->is_private()) return out;
+  const std::string list = ToUtf8(store_->GetPref(profile->id(), L"extensions_pinned").value_or(L""));
+  size_t start = 0;
+  while (start < list.size()) {
+    size_t comma = list.find(',', start);
+    if (comma == std::string::npos) comma = list.size();
+    const std::string id = list.substr(start, comma - start);
+    if (ExtensionBridge::IsExtensionId(id)) out.push_back(id);
+    start = comma + 1;
+  }
+  return out;
+}
+
+void Application::SetExtensionPinned(Profile* profile, const std::string& id, bool pinned) {
+  if (!profile || profile->is_private() || !ExtensionBridge::IsExtensionId(id)) return;
+  std::vector<std::string> list = PinnedExtensions(profile);
+  std::erase(list, id);
+  if (pinned) list.push_back(id);
+  std::string joined;
+  for (const std::string& x : list) joined += (joined.empty() ? "" : ",") + x;
+  store_->SetPref(profile->id(), L"extensions_pinned", FromUtf8(joined));
+  OnExtensionsChanged(profile);
+}
+
 void Application::OnExtensionsChanged(Profile* profile) {
   for (const auto& w : windows_) {
     if (w->profile() == profile && !w->closing()) w->OnExtensionsChanged();

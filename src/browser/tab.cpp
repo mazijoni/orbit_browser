@@ -637,6 +637,11 @@ void Tab::OnBeforeClose() {
 }
 
 void Tab::OnAddressChange(const std::wstring& url) {
+  // On the Web Store the extension bridge runs, so an install shows up at once
+  // (toolbar, Orbit's "added" toast) even in a profile with no extensions yet.
+  if (url.rfind(L"https://chromewebstore.google.com/", 0) == 0 && profile() && !profile()->is_private()) {
+    Application::Get()->Extensions(profile());
+  }
   if (url != Application::kNewTabUrl) empty_placeholder_ = false;
   if (record_.url != url) {
     record_.url = url;

@@ -25,14 +25,22 @@ HWND TopLevelOf(CefRefPtr<CefBrowser> browser) {
 
 }  // namespace
 
+// Off the screen and out of the taskbar at once: Chrome shows the window
+// itself a moment later, and nothing of it should ever be seen.
+static void Banish(HWND top) {
+  if (!top) return;
+  ::SetWindowLongPtrW(top, GWL_EXSTYLE, (::GetWindowLongPtrW(top, GWL_EXSTYLE) | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW);
+  ::SetWindowPos(top, nullptr, -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+  ::ShowWindow(top, SW_HIDE);
+}
+
 void DefaultClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
-  // Out of sight at once, so no Chrome window flashes up; shown again if the
-  // page turns out not to be one Orbit takes over.
-  if (HWND top = TopLevelOf(browser)) ::ShowWindow(top, SW_HIDE);
+  Banish(TopLevelOf(browser));
 }
 
 void DefaultClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   adopted_.erase(browser->GetIdentifier());
+  closing_.erase(browser->GetIdentifier());
   if (Application* app = Application::Get()) app->OnWindowBrowserClosed();
 }
 
@@ -71,9 +79,15 @@ bool DefaultClient::OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefF
 void DefaultClient::OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                                     const CefString& url) {
   if (!frame->IsMain() || adopted_.count(browser->GetIdentifier())) return;
-  if (!Adopt(browser, url.ToString())) {
-    if (HWND top = TopLevelOf(browser)) ::ShowWindow(top, SW_SHOWNA);  // not ours to take: leave it visible
-  }
+  Banish(TopLevelOf(browser));
+  if (Adopt(browser, url.ToString())) return;
+  // Anything else is a window Chrome opened for its own UI (after an
+  // extension install it opens a New Tab window only to show its "added"
+  // bubble). Orbit says that itself, so the window just goes.
+  if (url.ToString().rfind("about:blank", 0) == 0 && closing_.count(browser->GetIdentifier()) == 0) return;
+  closing_.insert(browser->GetIdentifier());
+  browser->GetHost()->CloseBrowser(true);
+  ORBIT_LOG_INFO("closed a window Chromium opened for its own UI");
 }
 
 }  // namespace orbit

@@ -14,6 +14,8 @@
 #include "core/log.h"
 #include "core/url_fixup.h"
 #include "ui/browser_window.h"
+
+#include "browser/extension_bridge.h"
 #include "ui/graphics.h"
 
 namespace orbit {
@@ -406,14 +408,6 @@ void BrowserWindow::PaintUrlBar(ID2D1RenderTarget* rt) {
     DrawGlyph(rt, g.icons_small(), bookmarked_ ? glyph::kStarFilled : glyph::kStar, star_,
               brush_.Get());
   }
-  if (ext_btn_.right > ext_btn_.left) {
-    if (hover_.kind == HitKind::kExtensions) {
-      brush_->SetColor(palette_.hover);
-      rt->FillRoundedRectangle(D2D1::RoundedRect(ext_btn_, 6.f, 6.f), brush_.Get());
-    }
-    brush_->SetColor(palette_.text_secondary);
-    DrawGlyph(rt, g.icons_small(), glyph::kExtensions, ext_btn_, brush_.Get());
-  }
   if (CanCopyUrlFromButton()) {
     if (hover_.kind == HitKind::kCopyUrl) {
       brush_->SetColor(palette_.hover);
@@ -429,6 +423,30 @@ void BrowserWindow::PaintToolbar(ID2D1RenderTarget* rt) {
   Tab* tab = active_tab();
   PaintIconButton(rt, menu_, glyph::kMenu, {HitKind::kMenu, 0}, true);
   PaintIconButton(rt, toggle_, glyph::kSidebar, {HitKind::kSidebarToggle, 0}, true);
+  if (ext_btn_.right > ext_btn_.left) {
+    PaintIconButton(rt, ext_btn_, glyph::kExtensions, {HitKind::kExtensions, 0}, true);
+  }
+  for (size_t i = 0; i < ext_pin_rects_.size(); ++i) {
+    const D2D1_RECT_F& r = ext_pin_rects_[i];
+    const Hit hit{HitKind::kExtensionPin, static_cast<int>(i)};
+    if (hover_ == hit) {
+      brush_->SetColor(pressed_ == hit ? palette_.pressed : palette_.hover);
+      rt->FillRoundedRectangle(D2D1::RoundedRect(r, metrics::kButtonRadius, metrics::kButtonRadius), brush_.Get());
+    }
+    const ExtensionInfo* e = PinnedExtension(static_cast<int>(i));
+    if (!e) continue;
+    const float cx = (r.left + r.right) / 2.f, cy = (r.top + r.bottom) / 2.f;
+    const D2D1_RECT_F icon{cx - 8.f, cy - 8.f, cx + 8.f, cy + 8.f};
+    if (!e->icon_pixels.bgra.empty()) {
+      if (ID2D1Bitmap* bmp = BitmapFor(e->icon_pixels, ext_icons_[e->id])) {
+        rt->DrawBitmap(bmp, icon, 1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        continue;
+      }
+    }
+    // No icon: the first letter of its name.
+    brush_->SetColor(palette_.text_secondary);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(icon, 3.f, 3.f), brush_.Get());
+  }
   PaintIconButton(rt, back_, glyph::kBack, {HitKind::kBack, 0},
                   tab && (tab->can_go_back() || BackClosesTab()));
   PaintIconButton(rt, forward_, glyph::kForward, {HitKind::kForward, 0},

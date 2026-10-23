@@ -543,6 +543,25 @@ void Workspace::PersistOrder() {
   Application::Get()->store().SetTabOrder(ids);
 }
 
+namespace {
+// Chrome preferences Orbit sets on each profile once Chromium has loaded them.
+class ContextReady : public CefRequestContextHandler {
+ public:
+  void OnRequestContextInitialized(CefRefPtr<CefRequestContext> context) override {
+    // Chrome's download bubble would pop up over Orbit when a download starts
+    // (an extension install from the Web Store downloads a file); Orbit has
+    // its own downloads UI.
+    CefRefPtr<CefValue> off = CefValue::Create();
+    off->SetBool(false);
+    CefString error;
+    if (context->CanSetPreference("download_bubble.partial_view_enabled")) {
+      context->SetPreference("download_bubble.partial_view_enabled", off, error);
+    }
+  }
+  IMPLEMENT_REFCOUNTING(ContextReady);
+};
+}  // namespace
+
 Profile::Profile(ProfileRecord record, std::filesystem::path data_dir, bool is_private)
     : record_(std::move(record)), data_dir_(std::move(data_dir)), is_private_(is_private) {}
 
@@ -557,7 +576,7 @@ CefRefPtr<CefRequestContext> Profile::request_context() {
       CefString(&settings.cache_path) = data_dir_.wstring();
     }
     settings.persist_session_cookies = false;
-    context_ = CefRequestContext::CreateContext(settings, nullptr);
+    context_ = CefRequestContext::CreateContext(settings, new ContextReady());
     if (!is_private_ && context_->GetCachePath().ToWString() != data_dir_.wstring()) {
       // CEF falls back to an in-memory profile if it rejects the path. That
       // would silently lose all site data, so make it loud.

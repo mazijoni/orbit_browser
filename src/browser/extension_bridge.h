@@ -18,6 +18,7 @@
 
 #include <windows.h>
 
+#include "browser/tab.h"  // FaviconPixels
 #include "include/cef_client.h"
 
 namespace orbit {
@@ -31,6 +32,7 @@ struct ExtensionInfo {
   std::string description;
   std::string location;      // FROM_STORE, UNPACKED, ...
   std::string icon;          // data: URL (may be empty)
+  FaviconPixels icon_pixels; // the icon decoded (empty if none)
   std::string options_url;   // chrome-extension://... (may be empty)
   std::string home_url;      // the Web Store page or the extension's home page
   std::string popup;         // action popup path from the manifest ("" = none)
@@ -128,6 +130,7 @@ class ExtensionBridge : public CefClient,
   std::vector<ExtensionInfo> extensions_;
   uint64_t revision_ = 0;
   bool developer_mode_ = false;
+  bool listed_once_ = false;  // the first list is what was already installed
   std::string last_error_;
 
   IMPLEMENT_REFCOUNTING(ExtensionBridge);

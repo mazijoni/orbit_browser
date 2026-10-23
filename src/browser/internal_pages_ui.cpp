@@ -276,6 +276,11 @@ InternalResponse SettingsPage(const InternalRequest& req) {
   const std::string body = R"html(
 <main>
   <h1>Settings</h1>
+  <h2>Default browser</h2>
+  <div class="card" style="display:flex;gap:12px;align-items:center">
+    <div class="grow" style="flex:1" id="defaultState">Checking…</div>
+    <button id="makeDefault" class="primary">Make Orbit the default browser</button>
+  </div>
   <h2>Startup</h2>
   <div class="card">
     <div class="row" style="padding-left:0"><label class="grow" for="continueLeftOff">Continue where you left off</label><input type="checkbox" id="continueLeftOff"></div>
@@ -399,6 +404,23 @@ async function set(key, value) {
 }
 (async () => {
   const s = await (await fetch('/api/get')).json();
+  const showDefault = (isDefault) => {
+    document.getElementById('defaultState').textContent = isDefault
+      ? 'Orbit is your default browser.'
+      : 'Orbit is not your default browser. Windows asks you to choose it in Default apps.';
+    document.getElementById('makeDefault').hidden = isDefault;
+  };
+  showDefault(s.defaultBrowser);
+  document.getElementById('makeDefault').onclick = async () => {
+    await orbitAction('/api/default-browser', {});
+    // Windows settings opened; check again when the user comes back.
+    const poll = setInterval(async () => {
+      const again = await (await fetch('/api/get')).json();
+      showDefault(again.defaultBrowser);
+      if (again.defaultBrowser) clearInterval(poll);
+    }, 2000);
+    setTimeout(() => clearInterval(poll), 120000);
+  };
   if (s.error) return;
   const themes = [['system', 'System'], ['dark', 'Dark'], ['light', 'Light']];
   const themeBox = document.getElementById('theme');

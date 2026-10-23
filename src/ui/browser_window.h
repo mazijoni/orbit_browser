@@ -32,6 +32,7 @@ namespace orbit {
 class Profile;
 class Tab;
 struct FaviconPixels;
+struct ExtensionInfo;
 class Workspace;
 class LibraryClient;
 
@@ -274,6 +275,9 @@ class BrowserWindow {
   // above the page, with the window controls; the sidebar holds the space.
   bool multi_toolbar() const { return multi_toolbar_ && !chrome_hidden(); }
   D2D1_RECT_F toolbar_rect() const { return toolbar_; }  // tests
+  D2D1_RECT_F extensions_button_rect() const { return ext_btn_; }  // tests
+  std::vector<std::string> pinned_extension_ids() const { return ext_pin_ids_; }  // tests
+  D2D1_RECT_F back_button_rect() const { return back_; }  // tests
   D2D1_RECT_F essentials_rect() const { return essentials_rect_; }  // tests
   std::vector<D2D1_RECT_F> essential_tile_rects() const { return EssentialRects(); }  // tests
   void ForceLayoutForTest() { Layout(); }  // tests
@@ -384,6 +388,12 @@ class BrowserWindow {
   std::vector<AccessibleItem> AccessibleItems() const;
   bool ExtensionsButtonShown() const;
   void ShowExtensionsMenu();
+  // Lays out the extensions button and the pinned extensions from |x|
+  // (left to right) while they fit before |limit|; returns where they end.
+  float LayoutExtensionButtons(float x, float y, float limit);
+  float LayoutPinnedExtensions(float x, float y, float limit);  // the pins only
+  const ExtensionInfo* PinnedExtension(int index) const;
+  void OpenExtensionAction(const ExtensionInfo& extension, const D2D1_RECT_F& anchor);
   void AccessibleInvoke(int kind, intptr_t key);  // posted to the window
   void AccessibleFocus(int kind, intptr_t key);
   void OnDownloadsChanged();
@@ -403,6 +413,7 @@ class BrowserWindow {
     kStar,
     kCopyUrl,
     kExtensions,      // the extensions button: lists extension actions
+    kExtensionPin,    // a pinned extension's toolbar button (index into ext_pin_ids_)
     kMenu,
     kSidebarToggle,   // compact mode
     kCaptionMin,
@@ -943,6 +954,11 @@ class BrowserWindow {
   std::unordered_map<const Tab*, CachedFavicon> pinned_favicons_;
   std::unordered_map<const Tab*, CachedFavicon> overlay_favicons_;
   std::unordered_map<const Tab*, CachedFavicon> overlay_pinned_favicons_;
+  // Pinned extensions in the top bar (after the extensions button).
+  std::vector<D2D1_RECT_F> ext_pin_rects_;
+  std::vector<std::string> ext_pin_ids_;
+  std::unordered_map<std::string, CachedFavicon> ext_icons_;
+  std::unordered_map<std::string, CachedFavicon> overlay_ext_icons_;
 
   // Cached layout rects (DIPs).
   D2D1_RECT_F address_rect_{}, back_{}, forward_{}, reload_{}, site_info_{}, menu_{}, star_{},
