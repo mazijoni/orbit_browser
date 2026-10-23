@@ -8,6 +8,8 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $version = (Select-String -Path (Join-Path $root 'CMakeLists.txt') -Pattern 'project\(orbit VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+# Marks which build this is in the file name (CI passes the commit).
+$build = if ($env:ORBIT_BUILD_ID) { $env:ORBIT_BUILD_ID } else { 'local' }
 $stage = Join-Path $root "dist\Orbit-$version"
 if (-not (Test-Path (Join-Path $stage 'orbit.exe'))) { throw "Nothing staged at $stage; run scripts/package.ps1 first." }
 
@@ -26,9 +28,9 @@ if (-not $iscc -and (Get-Command winget -ErrorAction SilentlyContinue)) {
 }
 if (-not $iscc) { throw 'Inno Setup (ISCC.exe) was not found and could not be installed.' }
 
-& $iscc "/DAppVersion=$version" "/DStageDir=$stage" (Join-Path $root 'installer\orbit.iss')
+& $iscc "/DAppVersion=$version" "/DBuildId=$build" "/DStageDir=$stage" (Join-Path $root 'installer\orbit.iss')
 if ($LASTEXITCODE) { throw "ISCC failed ($LASTEXITCODE)" }
-$setup = Join-Path $root "dist\Orbit-$version-setup.exe"
+$setup = Join-Path $root "dist\Orbit-$version-$build-setup.exe"
 Write-Host "Installer: $setup"
 Write-Host "SHA-256: $((Get-FileHash $setup -Algorithm SHA256).Hash)"
 Write-Host 'Note: unsigned; Windows SmartScreen will warn until it is code-signed.'

@@ -7,6 +7,9 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
+#ifndef BuildId
+  #define BuildId "local"
+#endif
 #ifndef StageDir
   #define StageDir "..\dist\Orbit"
 #endif
@@ -23,7 +26,7 @@ DisableReadyPage=yes
 PrivilegesRequired=lowest
 Uninstallable=no
 OutputDir=..\dist
-OutputBaseFilename=Orbit-{#AppVersion}-setup
+OutputBaseFilename=Orbit-{#AppVersion}-{#BuildId}-setup
 SetupIconFile=..\resources\orbit.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -35,5 +38,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 Source: "{#StageDir}\*"; DestDir: "{tmp}\orbit-payload"; Flags: recursesubdirs createallsubdirs ignoreversion deleteafterinstall
 
 [Run]
+; A running Orbit would keep its old files locked, so close it first.
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM orbit.exe"; Flags: runhidden waituntilterminated
 Filename: "{tmp}\orbit-payload\orbit.exe"; Parameters: "--install --quiet"; StatusMsg: "Installing Orbit..."; Flags: waituntilterminated runhidden
 Filename: "{localappdata}\Programs\Orbit\orbit.exe"; Description: "Start Orbit"; Flags: nowait postinstall skipifsilent

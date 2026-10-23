@@ -35,6 +35,8 @@ jobs:
 
       - name: Build the installer
         shell: pwsh
+        env:
+          ORBIT_BUILD_ID: build${{ github.run_number }}
         run: ./scripts/make_installer.ps1
 
       - name: Upload the installer
