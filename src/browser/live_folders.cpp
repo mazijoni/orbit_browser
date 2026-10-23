@@ -143,8 +143,8 @@ void LiveFolders::Tick() {
 Workspace* LiveFolders::WorkspaceOf(int64_t group_id) const {
   for (const auto& p : Application::Get()->profiles()) {
     if (p->is_private()) continue;
-    for (const auto& ws : p->workspaces()) {
-      if (ws->FindGroup(group_id)) return ws.get();
+    for (Workspace* ws : p->containers()) {
+      if (ws->FindGroup(group_id)) return ws;
     }
   }
   return nullptr;
@@ -166,9 +166,8 @@ void LiveFolders::Create(Workspace* ws, LiveFolderState::Kind kind, const std::w
     return;
   }
   const int64_t ws_id = ws->id();
-  Profile* profile = ws->profile();
-  auto make = [this, ws_id, profile, kind](const std::wstring& label, const std::wstring& url) -> int64_t {
-    Workspace* target = profile->FindWorkspace(ws_id);
+  auto make = [this, ws_id, kind](const std::wstring& label, const std::wstring& url) -> int64_t {
+    Workspace* target = Application::Get()->FindSpace(ws_id);  // it may have changed profile
     if (!target) return 0;
     const uint32_t color = ui::kAccentChoices[(target->groups().size() + 1) % std::size(ui::kAccentChoices)];
     const int64_t id = target->CreateSubfolder(0, label, nullptr, color);
@@ -195,7 +194,7 @@ void LiveFolders::Create(Workspace* ws, LiveFolderState::Kind kind, const std::w
   // The folder is named after the feed (getMetadata), so ask it first; the
   // same answer fills the folder.
   const int generation = generation_;
-  FetchText(profile, feed_url, L"", /*cookies=*/true, [this, make, feed_url, done, generation](int status,
+  FetchText(ws->profile(), feed_url, L"", /*cookies=*/true, [this, make, feed_url, done, generation](int status,
                                                                                 const std::string& body) {
     if (generation != generation_) return;
     const std::optional<Feed> feed = status == 200 ? ParseFeed(body) : std::nullopt;

@@ -46,8 +46,9 @@ TEST(Schema_UpgradesFromV1KeepingData) {
   {
     Database db;
     EXPECT_TRUE(db.Open(tmp.path));
-    // Simulate a v1 database by applying only the first migration.
-    EXPECT_TRUE(MigrateSchema(db));
+    // Simulate a v1 database: v11, then undo v2..v11 (v12's columns carry
+    // foreign keys, which SQLite cannot drop).
+    EXPECT_TRUE(MigrateSchema(db, 11));
     EXPECT_TRUE(db.Execute("DROP TABLE history; DROP TABLE bookmarks; DROP TABLE downloads;"));
     EXPECT_TRUE(db.Execute("ALTER TABLE closed_tabs DROP COLUMN batch_id;"));  // v3
     EXPECT_TRUE(db.Execute("ALTER TABLE tabs DROP COLUMN pinned_url;"));       // v4
@@ -81,7 +82,7 @@ TEST(Schema_UpgradesFromV2KeepingClosedTabs) {
   {
     Database db;
     EXPECT_TRUE(db.Open(tmp.path));
-    EXPECT_TRUE(MigrateSchema(db));
+    EXPECT_TRUE(MigrateSchema(db, 11));
     EXPECT_TRUE(db.Execute("ALTER TABLE closed_tabs DROP COLUMN batch_id;"));
     EXPECT_TRUE(db.Execute("ALTER TABLE tabs DROP COLUMN pinned_url;"));
     EXPECT_TRUE(db.Execute("ALTER TABLE tabs DROP COLUMN custom_title;"));
@@ -135,22 +136,160 @@ TEST(Store_PinnedUrlRoundTrips) {
   }
 }
 
-TEST(Store_EssentialsContainerKindRoundTrips) {
+TEST(Store_EssentialsBelongToTheirSpace) {
   Database db;
   EXPECT_TRUE(db.Open({}));
   EXPECT_TRUE(MigrateSchema(db));
   Store store(db);
   auto p = store.CreateProfile(L"u", L"P", 0, L"");
   auto space = store.CreateWorkspace(p->id, L"Home", 0, L"");
-  auto ess = store.CreateWorkspace(p->id, L"Essentials", 0, L"", WorkspaceRecord::kKindEssentials);
+  WorkspaceRecord grid;
+  grid.profile_id = p->id;
+  grid.name = L"Essentials";
+  grid.kind = WorkspaceRecord::kKindEssentials;
+  grid.owner_id = space->id;
+  auto ess = store.CreateWorkspace(grid);
   EXPECT_TRUE(space.has_value() && ess.has_value());
+  TabRecord t;
+  t.workspace_id = ess->id;
+  t.url = L"https://mail.example/";
+  t.pinned = true;
+  EXPECT_TRUE(store.InsertTab(t) != 0);
   int spaces = 0, essentials = 0;
   for (const auto& w : store.LoadWorkspaces(p->id)) {
     spaces += w.kind == WorkspaceRecord::kKindSpace;
-    essentials += w.kind == WorkspaceRecord::kKindEssentials;
+    if (w.kind == WorkspaceRecord::kKindEssentials) {
+      ++essentials;
+      EXPECT_EQ(w.owner_id, space->id);
+    }
   }
   EXPECT_EQ(spaces, 1);
   EXPECT_EQ(essentials, 1);
+  // Deleting the space deletes its grid and the grid's tabs.
+  EXPECT_TRUE(store.DeleteWorkspace(space->id));
+  EXPECT_TRUE(store.LoadWorkspaces(p->id).empty());
+  EXPECT_TRUE(store.LoadTabs(ess->id).empty());
+}
+
+TEST(Store_LinkedSpaceOutlivesItsParent) {
+  Database db;
+  EXPECT_TRUE(db.Open({}));
+  EXPECT_TRUE(MigrateSchema(db));
+  Store store(db);
+  auto p = store.CreateProfile(L"u", L"P", 0, L"");
+  auto parent = store.CreateWorkspace(p->id, L"Home", 0, L"");
+  WorkspaceRecord linked;
+  linked.profile_id = p->id;
+  linked.name = L"Home - Window 2";
+  linked.kind = WorkspaceRecord::kKindLinked;
+  linked.parent_id = parent->id;
+  auto made = store.CreateWorkspace(linked);
+  EXPECT_TRUE(made.has_value());
+  if (!made) return;
+  EXPECT_EQ(made->parent_id, parent->id);
+  // The parent goes: the linked space stays, unlinked (ON DELETE SET NULL).
+  EXPECT_TRUE(store.DeleteWorkspace(parent->id));
+  const auto left = store.LoadWorkspaces(p->id);
+  EXPECT_EQ(left.size(), size_t{1});
+  if (!left.empty()) {
+    EXPECT_EQ(left[0].parent_id, 0);
+    EXPECT_EQ(left[0].kind, WorkspaceRecord::kKindLinked);  // Profile turns it into a space
+  }
+  // A window keeps the linked space it owns.
+  WindowRecord w;
+  w.profile_id = p->id;
+  w.workspace_id = made->id;
+  w.linked_id = made->id;
+  w.w = w.h = 100;
+  EXPECT_TRUE(store.SaveWindows({w}));
+  const auto windows = store.LoadWindows();
+  EXPECT_EQ(windows.size(), size_t{1});
+  if (!windows.empty()) EXPECT_EQ(windows[0].linked_id, made->id);
+}
+
+TEST(Store_SpacesShareOneOrderAcrossProfiles) {
+  Database db;
+  EXPECT_TRUE(db.Open({}));
+  EXPECT_TRUE(MigrateSchema(db));
+  Store store(db);
+  auto a = store.CreateProfile(L"a", L"A", 0, L"");
+  auto b = store.CreateProfile(L"b", L"B", 0, L"");
+  auto one = store.CreateWorkspace(a->id, L"One", 0, L"");
+  auto two = store.CreateWorkspace(b->id, L"Two", 0, L"");
+  auto three = store.CreateWorkspace(a->id, L"Three", 0, L"");
+  auto grid = store.CreateWorkspace(a->id, L"Essentials", 0, L"", WorkspaceRecord::kKindEssentials);
+  EXPECT_EQ(one->position, 0);
+  EXPECT_EQ(two->position, 1);
+  EXPECT_EQ(three->position, 2);
+  EXPECT_EQ(grid->position, 0);  // not a space: no place in the order
+  // Moving a space to another profile keeps its row (and its tabs).
+  WorkspaceRecord moved = *two;
+  moved.profile_id = a->id;
+  EXPECT_TRUE(store.UpdateWorkspace(moved));
+  EXPECT_EQ(store.LoadWorkspaces(b->id).size(), size_t{0});
+  EXPECT_EQ(store.LoadWorkspaces(a->id).size(), size_t{4});
+}
+
+TEST(Schema_V12CopiesSharedEssentialsIntoEverySpace) {
+  Database db;
+  EXPECT_TRUE(db.Open({}));
+  EXPECT_TRUE(MigrateSchema(db, 11));
+  EXPECT_TRUE(db.Execute(
+      "INSERT INTO profiles (id, uuid, name, color, position, created_at) VALUES "
+      "(1, 'a', 'A', 0, 0, 0), (2, 'b', 'B', 0, 1, 0);"
+      "INSERT INTO workspaces (id, profile_id, name, color, position, kind) VALUES "
+      "(10, 1, 'Home', 0, 0, 0), (11, 1, 'Work', 0, 1, 0), (12, 1, 'Essentials', 0, 2, 1), "
+      "(20, 2, 'Other', 0, 0, 0);"
+      "INSERT INTO tabs (id, workspace_id, url, pinned, pinned_url, position) VALUES "
+      "(100, 12, 'https://mail.example/', 1, 'https://mail.example/', 0), "
+      "(101, 12, 'https://chat.example/', 1, 'https://chat.example/', 1), "
+      "(102, 10, 'https://home.example/', 0, '', 0);"
+      "INSERT INTO windows (profile_id, workspace_id, active_tab_id, x, y, w, h, position) VALUES "
+      "(1, 11, 101, 0, 0, 1, 1, 0);"));
+  EXPECT_TRUE(MigrateSchema(db));
+  EXPECT_EQ(db.UserVersion(), kSchemaVersion);
+  Store store(db);
+  int grids = 0;
+  int64_t work_chat = 0;
+  for (const auto& w : store.LoadWorkspaces(1)) {
+    if (w.kind == WorkspaceRecord::kKindSpace) {
+      EXPECT_TRUE(w.owner_id == 0 && w.parent_id == 0);
+      continue;
+    }
+    EXPECT_EQ(w.kind, WorkspaceRecord::kKindEssentials);
+    ++grids;
+    EXPECT_TRUE(w.owner_id == 10 || w.owner_id == 11);
+    const auto tabs = store.LoadTabs(w.id);
+    EXPECT_EQ(tabs.size(), size_t{2});
+    if (tabs.size() == 2) {
+      EXPECT_WEQ(tabs[0].url, L"https://mail.example/");
+      EXPECT_WEQ(tabs[1].url, L"https://chat.example/");
+      EXPECT_TRUE(tabs[0].pinned && tabs[1].pinned);
+      EXPECT_WEQ(tabs[1].pinned_url, L"https://chat.example/");
+      if (w.owner_id == 11) work_chat = tabs[1].id;
+    }
+  }
+  EXPECT_EQ(grids, 2);  // one copy per space of the profile
+  for (const auto& w : store.LoadWorkspaces(2)) EXPECT_EQ(w.kind, WorkspaceRecord::kKindSpace);
+  EXPECT_TRUE(store.LoadTabs(12).empty());  // the shared row is gone, with its tabs
+  EXPECT_EQ(store.LoadTabs(10).size(), size_t{1});
+  // The window that was on the shared 'chat' selects Work's copy.
+  const auto windows = store.LoadWindows();
+  EXPECT_EQ(windows.size(), size_t{1});
+  EXPECT_TRUE(work_chat != 0);
+  if (!windows.empty()) EXPECT_EQ(windows[0].active_tab_id, work_chat);
+  // One order for every profile's spaces: A's (in order), then B's.
+  int64_t order[3] = {};
+  for (int64_t profile : {1, 2}) {
+    for (const auto& w : store.LoadWorkspaces(profile)) {
+      if (w.kind == WorkspaceRecord::kKindSpace && w.position >= 0 && w.position < 3) {
+        order[w.position] = w.id;
+      }
+    }
+  }
+  EXPECT_EQ(order[0], 10);
+  EXPECT_EQ(order[1], 11);
+  EXPECT_EQ(order[2], 20);
 }
 
 TEST(Store_SplitViewsRoundTripAndCascade) {

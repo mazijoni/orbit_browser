@@ -41,34 +41,34 @@ html,body{height:100%;overflow:hidden}
 body{background:linear-gradient(135deg,)html" + bg + "," + bg2 + R"html();-webkit-user-select:none;user-select:none}
 .ico{font-family:"Segoe Fluent Icons","Segoe MDL2 Assets";font-style:normal;font-size:16px;line-height:1}
 #lib{display:flex;height:100%)html" + std::string(right ? ";flex-direction:row-reverse" : "") + R"html(}
-#side{width:110px;display:flex;flex-direction:column;justify-content:space-between;padding:12px 8px;
+#side{width:72px;display:flex;flex-direction:column;justify-content:space-between;padding:10px 6px;
   background:linear-gradient(to right,transparent,rgba(255,255,255,.08));box-shadow:9px 0 17px rgba(0,0,0,.04)}
-.tab{display:flex;flex-direction:column;align-items:center;gap:6px;width:100%;padding:10px 4px;border-radius:12px;
-  background:transparent;border:0;color:var(--muted);font-size:12px}
-.tab .ico{font-size:22px}
+.tab{display:flex;flex-direction:column;align-items:center;gap:4px;width:100%;padding:8px 2px;border-radius:10px;
+  background:transparent;border:0;color:var(--muted);font-size:11px}
+.tab .ico{font-size:17px}
 .tab:hover{background:color-mix(in srgb,currentColor 7%,transparent);color:var(--text)}
 .tab[aria-selected=true]{background:color-mix(in srgb,currentColor 12%,transparent);color:var(--text)}
-#close{align-self:center;width:34px;height:34px;padding:0;border-radius:999px;display:grid;place-items:center}
-#content{flex:1;min-width:0;display:flex;flex-direction:column;padding:18px 18px 0}
-#content h1{font-size:18px;margin:2px 4px 12px;display:flex;align-items:center;gap:8px}
+#close{align-self:center;width:28px;height:28px;padding:0;border-radius:999px;display:grid;place-items:center}
+#content{flex:1;min-width:0;display:flex;flex-direction:column;padding:12px 12px 0;font-size:13px}
+#content h1{font-size:15px;margin:2px 4px 10px;display:flex;align-items:center;gap:8px}
 #content h1 .grow{flex:1}
-#content h1 button{font-size:13px;font-weight:500;padding:5px 12px}
+#content h1 button{font-size:12px;font-weight:500;padding:4px 10px}
 .list{flex:1;overflow:auto;padding:0 0 18px;scrollbar-width:thin}
 .pill{background:color-mix(in srgb,currentColor 7%,transparent);border-radius:12px;padding:8px 10px;display:flex;align-items:center;gap:10px;cursor:default}
 .pill:hover{background:color-mix(in srgb,currentColor 12%,transparent)}
 .day{font-size:12px;color:var(--muted);margin:14px 6px 6px;font-weight:600}
-.item{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:10px;cursor:default}
+.item{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:8px;cursor:default}
 .item:hover{background:color-mix(in srgb,currentColor 7%,transparent)}
-.tile{width:24px;height:24px;flex:none;border-radius:7px;display:grid;place-items:center;font-size:12px;font-weight:600;
+.tile{width:20px;height:20px;flex:none;border-radius:6px;display:grid;place-items:center;font-size:11px;font-weight:600;
   background:color-mix(in srgb,currentColor 12%,transparent)}
 .item .grow{flex:1;min-width:0}
 .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.s{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.s{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .item button{padding:4px 8px;font-size:12px}
 input[type=search]{width:100%;margin:0 0 6px;background:color-mix(in srgb,currentColor 7%,transparent);border:0;border-radius:10px}
 .bar{height:4px;border-radius:2px;background:color-mix(in srgb,currentColor 12%,transparent);margin-top:5px;overflow:hidden}
 .bar>i{display:block;height:100%;background:var(--accent)}
-.space{margin:0 0 10px;padding:10px;border-radius:14px;background:color-mix(in srgb,currentColor 5%,transparent)}
+.space{margin:0 0 8px;padding:8px;border-radius:12px;background:color-mix(in srgb,currentColor 5%,transparent)}
 .space[data-current=true]{outline:2px solid color-mix(in srgb,var(--accent) 60%,transparent)}
 .space header{display:flex;align-items:center;gap:8px;padding:4px 6px 8px;font-weight:600;cursor:default}
 .space header .badge{font-size:11px;font-weight:500;color:var(--muted)}

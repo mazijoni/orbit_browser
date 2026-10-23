@@ -9,6 +9,7 @@
 #include <csignal>
 #include <dbghelp.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cwctype>
 #include <filesystem>
@@ -20,9 +21,14 @@
 #include "app/application.h"
 #include "app/test_http_server.h"
 #include "browser/downloads.h"
+#include "browser/password_vault.h"
 #include "browser/permissions.h"
 #include "core/process_metrics.h"
 #include "browser/browser_client.h"
+#include "app/orbit_app.h"
+#include "browser/extension_bridge.h"
+#include "browser/extension_popup.h"
+#include "browser/find_bar.h"
 #include "browser/profile.h"
 #include "browser/tab.h"
 #include "core/log.h"
@@ -222,17 +228,24 @@ void AddBasicSuite(Runner& r) {
     r.Check(s->tab->security() == SecurityLevel::kInternal, "orbit:// shows internal identity");
   });
 
-  r.Add("open 4 tabs (Ctrl+T + navigate)", [s] {
+  // A tab that was closing when this step began leaves the list a moment later
+  // (Chrome style finishes closing asynchronously), so it is not counted.
+  auto closing_at_start = std::make_shared<size_t>(0);
+  r.Add("open 4 tabs (Ctrl+T + navigate)", [s, closing_at_start] {
     s->tabs_before = s->window->workspace()->tabs().size();
+    *closing_at_start = 0;
+    for (const auto& t : s->window->workspace()->tabs()) {
+      if (t->load_state() == Tab::LoadState::kClosing || t->close_requested()) ++*closing_at_start;
+    }
     for (int i = 0; i < 4; ++i) {
       // Ctrl+T opens the floating URL bar; Enter creates the tab (Zen).
       s->window->HandleAccelerator('T', true, false, false);
       s->window->TypeInAddressBar(TestUrl(L"t=Tab" + std::to_wstring(i)));
       s->window->SubmitAddressBar();
     }
-  }, [s] {
+  }, [s, closing_at_start] {
     const auto& tabs = s->window->workspace()->tabs();
-    if (tabs.size() != s->tabs_before + 4) return false;
+    if (tabs.size() != s->tabs_before + 4 - *closing_at_start) return false;
     for (const auto& t : tabs) {
       if (!t->has_browser()) return false;
     }
@@ -293,7 +306,8 @@ void AddBasicSuite(Runner& r) {
     r.Check(ws->groups().empty(), "empty group removed");
     r.Check(app->store().LoadTabGroups(ws->id()).empty(), "group row removed from the store");
     child->RequestClose();
-  }, [s, app] { return s->window->workspace()->tabs().size() == 5; });
+  }, [s, app] {
+    return s->window->workspace()->tabs().size() == 5; });
 
   r.Add("Ctrl+W closes active tab", [s] {
     s->tabs_before = s->window->workspace()->tabs().size();
@@ -331,6 +345,28 @@ void AddBasicSuite(Runner& r) {
     s->window->active_tab()->Navigate(TestUrl(L"t=Popup&op=popup"));
   }, [s] { return s->window->active_tab()->record().title == L"POPUP-TRIED"; });
 
+  r.Add("media: which codecs this engine can play (informational)", [s] {
+    s->window->active_tab()->Navigate(TestUrl(L"op=codecs"));
+  }, [s, &r] {
+    const std::wstring& t = s->window->active_tab()->record().title;
+    if (!t.starts_with(L"C:")) return false;
+    r.Log("  info " + N(t));
+    r.Check(t.find(L"h264=no") == std::wstring::npos && t.find(L"aac=no") == std::wstring::npos,
+            "H.264 and AAC are playable (needs a CEF build with proprietary codecs)");
+    r.Check(t.find(L"vp9=no") == std::wstring::npos, "VP9 is playable");
+    return true;
+  });
+  auto media_server = std::make_shared<TestHttpServer>();
+  r.Add("media: an H.264 clip plays", [s, media_server, &r] {
+    r.Check(media_server->Start(), "test HTTP server listening");
+    s->window->active_tab()->Navigate(media_server->Url(L"/playmp4"));
+  }, [s, media_server, &r] {
+    const std::wstring& t = s->window->active_tab()->record().title;
+    if (!t.starts_with(L"MP4:")) return false;
+    r.Log("  info " + N(t));
+    r.Check(t.starts_with(L"MP4:OK"), "the recorded H.264 video plays and advances");
+    return true;
+  }, 20000);
   r.Add("no tab was added by the blocked popup", [s, &r] {
     r.Check(s->window->workspace()->tabs().size() == s->tabs_before,
             "tab count unchanged after window.open() without gesture");
@@ -423,6 +459,98 @@ void AddIsolationSuite(Runner& r) {
     return true;
   });
 
+  // Spaces of two profiles in one window (Zen's container per space): each
+  // space's tabs use its own profile's storage.
+  struct Mixed {
+    Workspace* home = nullptr;   // A's space in window A
+    Workspace* b_space = nullptr;
+    Workspace* mover = nullptr;
+    Tab* tab = nullptr;
+  };
+  auto m = std::make_shared<Mixed>();
+  auto title_is = [](Tab* t, const wchar_t* prefix) {
+    return t && t->has_browser() && !t->loading() && t->record().title.rfind(prefix, 0) == 0;
+  };
+  r.Add("one window switches to a space of profile B", [s, m, app, &r] {
+    m->home = s->wa->workspace();
+    m->b_space = app->CreateWorkspace(s->b, L"B in window A", 0x7C8CFF);
+    const auto spaces = s->wa->Spaces();
+    r.Check(std::find(spaces.begin(), spaces.end(), m->b_space) != spaces.end(),
+            "window A lists profile B's space");
+    s->wa->ShowWorkspace(m->b_space, 0);
+    r.Check(s->wa->workspace() == m->b_space && s->wa->profile() == s->b,
+            "window A now shows it, as profile B");
+    m->tab = s->wa->active_tab();
+    m->tab->Navigate(TestUrl(L"op=write&v=secretB"));
+  }, [m] { return m->tab->record().title == L"DONE" && !m->tab->loading(); });
+  r.Add("the tab lives in profile B's storage", [s, m, &r] {
+    r.Check(m->tab->browser()->GetHost()->GetRequestContext()->IsSame(s->b->request_context()),
+            "its browser uses profile B's request context");
+    m->tab->Navigate(TestUrl(L"op=read&n=3"));
+  }, [m, title_is, &r] {
+    if (!title_is(m->tab, L"R:")) return false;
+    r.Check(m->tab->record().title == L"R:secretB|secretB",
+            "B's space reads B's data ('" + N(m->tab->record().title) + "')");
+    return true;
+  });
+  r.Add("back in A's space, the same window reads A's data only", [s, m, &r] {
+    s->wa->ShowWorkspace(m->home, 0);
+    r.Check(s->wa->profile() == s->a, "the window follows the space back to profile A");
+    s->wa->active_tab()->Navigate(TestUrl(L"op=read&n=4"));
+  }, [s, title_is, &r] {
+    Tab* t = s->wa->active_tab();
+    if (!title_is(t, L"R:")) return false;
+    r.Check(t->record().title == L"R:secretA|secretA", "A's space read '" + N(t->record().title) + "'");
+    return true;
+  });
+  r.Add("a space of profile A moves to profile B", [s, m, app, &r] {
+    m->mover = app->CreateWorkspace(s->a, L"Mover", 0xE0905A);
+    s->wa->ShowWorkspace(m->mover, 0);
+    m->tab = s->wa->active_tab();
+    m->tab->Navigate(TestUrl(L"t=Mover"));
+  }, [m, title_is] { return title_is(m->tab, L"Mover"); });
+  r.Add("moving it unloads its tabs and switches the window's profile", [s, m, app, &r] {
+    const int id = m->tab->browser()->GetIdentifier();
+    r.Check(s->wa->MoveSpaceToProfile(m->mover, s->b), "moved");
+    r.Check(m->mover->profile() == s->b && s->wa->profile() == s->b, "the space and the window use profile B");
+    r.Check(s->b->FindWorkspace(m->mover->id()) == m->mover && !s->a->FindWorkspace(m->mover->id()),
+            "profile B owns it now");
+    r.Check(s->wa->visible_toast_id() == L"space-profile", "a toast says the tabs reload signed out");
+    r.Check(app->client()->FindTab(id) == nullptr || m->tab->load_state() != Tab::LoadState::kLive,
+            "its tab's old browser is closing");
+    bool stored = false;
+    for (const auto& w : app->store().LoadWorkspaces(s->b->id())) stored |= w.id == m->mover->id();
+    r.Check(stored, "stored under profile B");
+  }, [m, s] {
+    // On screen, it loads again by itself, in profile B's storage.
+    return m->tab->has_browser() && !m->tab->loading() &&
+           m->tab->browser()->GetHost()->GetRequestContext()->IsSame(s->b->request_context());
+  });
+  r.Add("after the reload it reads profile B's storage", [m] {
+    m->tab->Navigate(TestUrl(L"op=read&n=5"));
+  }, [m, title_is, &r] {
+    if (!title_is(m->tab, L"R:")) return false;
+    r.Check(m->tab->record().title == L"R:secretB|secretB",
+            "the moved space reads B's data ('" + N(m->tab->record().title) + "')");
+    return true;
+  });
+  r.Add("a tab moved to a space of another profile reloads there", [s, m, app, &r] {
+    s->wa->ShowWorkspace(m->home, 0);
+    m->tab = s->wa->OpenTab(TestUrl(L"t=Traveller"), true);
+  }, [m, title_is] { return title_is(m->tab, L"Traveller"); });
+  r.Add("... it unloads and keeps its URL", [s, m, &r] {
+    s->wa->MoveTabToWorkspace(m->tab, m->b_space);
+    r.Check(m->tab->workspace() == m->b_space, "in B's space");
+    r.Check(s->wa->visible_toast_id() == L"tab-profile", "with the signed-out warning");
+  }, [m] { return !m->tab->has_browser() && m->tab->load_state() == Tab::LoadState::kUnloaded &&
+                  m->tab->url() == TestUrl(L"t=Traveller"); });
+  r.Add("... and selected, it loads in profile B", [s, m] {
+    s->wa->ShowWorkspace(m->b_space, 0);
+    s->wa->ActivateTab(m->tab);
+  }, [m, s] {
+    return m->tab->has_browser() && !m->tab->loading() &&
+           m->tab->browser()->GetHost()->GetRequestContext()->IsSame(s->b->request_context());
+  });
   r.Add("private window is isolated from profile A", [s, app] {
     BrowserWindow* w = app->OpenPrivateWindow();
     w->active_tab()->Navigate(TestUrl(L"op=read"));
@@ -709,7 +837,7 @@ void AddRestorePhase1(Runner& r) {
     // A pinned page different from the current one: must survive the restart.
     two->SetPinnedUrl(TestUrl(L"t=TwoHome"));
     ws->tabs().back()->SetCustomTitle(L"Labelled Three");  // 'Three', persisted label
-    // An Essential must come back after the restart, outside every space.
+    // An Essential must come back after the restart, in its own space's grid.
     Tab* ess = (*window)->OpenTab(TestUrl(L"t=EssentialRestored"), false);
     (*window)->AddToEssentials(ess);
     // zen.pinned-tab-manager.restore-pinned-tabs-to-pinned-url, checked after restart.
@@ -732,6 +860,17 @@ void AddRestorePhase1(Runner& r) {
     Application::Get()->CreateWorkspace((*window)->profile(), L"EmptyRestored", 0x4FB3A9);
     (*window)->HandleAccelerator(VK_RIGHT, true, false, true);
     (*window)->HandleAccelerator(VK_LEFT, true, false, true);
+    // A linked window (a tab torn off) must come back with its space.
+    if (Tab* torn = (*window)->OpenTab(TestUrl(L"t=LinkedRestored"), false)) (*window)->TearOffTab(torn);
+    // (After the visit above, which goes to the next space.) A space moved to a profile of its own (Zen's container per space).
+    if (Profile* work = Application::Get()->CreateProfile(L"RestoreWork", 0x4FB3A9, /*with_space=*/false)) {
+      Workspace* moved = Application::Get()->CreateWorkspace((*window)->profile(), L"WorkRestored", 0x4FB3A9);
+      TabRecord rec;
+      rec.url = TestUrl(L"t=WorkTab");
+      rec.title = L"WorkTab";
+      moved->InsertTab(std::make_unique<Tab>(moved, rec), -1);
+      (*window)->MoveSpaceToProfile(moved, work);
+    }
     // A glance left open at exit is not restored (ZenGlanceManager.onUnload).
     (*window)->OpenGlance((*window)->active_tab(), TestUrl(L"t=GlanceAtExit"));
     // A split with custom sizes in a space that is not on screen must come back.
@@ -801,10 +940,16 @@ void AddRestorePhase2(Runner& r) {
     r.Check(tabs[2]->record().title == L"One" && tabs[3]->record().title == L"Three",
             "remaining order preserved");
     r.Check(tabs[3]->DisplayTitle() == L"Labelled Three", "custom tab label restored");
-    const Workspace* ess = w->profile()->essentials();
+    const Workspace* ess = w->workspace()->essentials();
     r.Check(ess && ess->tabs().size() == 1 &&
                 ess->tabs()[0]->url() == TestUrl(L"t=EssentialRestored") && ess->tabs()[0]->pinned(),
-            "the Essential was restored outside the spaces");
+            "the Essential was restored in its space's grid");
+    bool elsewhere = false;
+    for (const auto& other : w->profile()->workspaces()) {
+      elsewhere |= other.get() != w->workspace() && other->essentials() &&
+                   !other->essentials()->tabs().empty();
+    }
+    r.Check(!elsewhere, "and in no other space");
     r.Check(w->active_tab() == tabs[3].get(), "previously active tab is active");
     bool glance_restored = false;
     for (const auto& t : tabs) glance_restored |= t->url() == TestUrl(L"t=GlanceAtExit");
@@ -823,6 +968,28 @@ void AddRestorePhase2(Runner& r) {
              members[1]->record().title == L"Right" && left > 29.f && left < 31.f;
       }
       r.Check(ok, "the split view came back with its sizes");
+    }
+    {
+      BrowserWindow* lw = nullptr;
+      for (const auto& other : app->windows()) {
+        if (other.get() != w && other->workspace() && other->workspace()->is_linked()) lw = other.get();
+      }
+      const Workspace* ls = lw ? lw->workspace() : nullptr;
+      r.Check(ls && ls->parent() == w->workspace() && lw->linked_space() == ls,
+              "the linked window came back on its linked space, linked to Home");
+      r.Check(ls && ls->tabs().size() == 1 && ls->tabs()[0]->url() == TestUrl(L"t=LinkedRestored"),
+              "with its tab");
+      r.Check(w->LinkedChildren().size() == 1, "Home shows its folder row");
+    }
+    {
+      const Workspace* work = nullptr;
+      for (Workspace* ws : w->Spaces()) {
+        if (ws->record().name == L"WorkRestored") work = ws;
+      }
+      r.Check(work && work->profile()->record().name == L"RestoreWork" && work != w->workspace(),
+              "a space moved to another profile came back in that profile, in the window's list");
+      r.Check(work && work->tabs().size() == 1 && work->tabs()[0]->url() == TestUrl(L"t=WorkTab"),
+              "with its tab");
     }
     const Workspace* empty = nullptr;
     for (const auto& ws : w->profile()->workspaces()) {
@@ -920,7 +1087,10 @@ void AddRestorePhase3(Runner& r) {
 // points as the UI (shortcuts, commands) and checks the real outcome.
 std::wstring ClipboardText() {
   std::wstring text;
-  if (!::OpenClipboard(nullptr)) return text;
+  // Another process (a clipboard manager) may hold it for a moment.
+  bool open = false;
+  for (int attempt = 0; attempt < 40 && !(open = ::OpenClipboard(nullptr)); ++attempt) ::Sleep(10);
+  if (!open) return text;
   if (HANDLE data = ::GetClipboardData(CF_UNICODETEXT)) {
     if (const auto* chars = static_cast<const wchar_t*>(::GlobalLock(data))) {
       text = chars;
@@ -951,10 +1121,8 @@ void AddZenSuite(Runner& r) {
 
   r.Add("Ctrl+Shift+C copies the current URL and shows a toast", [s, &r] {
     r.Check(s->window->HandleAccelerator('C', true, true, false), "Ctrl+Shift+C handled");
-    r.Check(ClipboardText() == s->tab->url(),
-            "clipboard holds the tab URL ('" + N(ClipboardText()) + "')");
     r.Check(s->window->visible_toast_id() == L"copy-url", "\"Copied current URL!\" toast shown");
-  });
+  }, [s] { return ClipboardText() == s->tab->url(); });  // another process may hold the clipboard for a moment
 
   r.Add("the copy toast hides after its 3 s timeout", nullptr,
         [s] { return s->window->visible_toast_id().empty(); }, 6000);
@@ -1324,39 +1492,75 @@ void AddZenSuite(Runner& r) {
   r.Add("Add to Essentials moves the tab out of the space and keeps it on screen", [s, e, app, &r] {
     r.Check(s->window->AddToEssentials(e->tab), "added");
     Profile* prof = s->window->profile();
-    r.Check(prof->IsEssential(e->tab) && e->home->IndexOf(e->tab) < 0, "now an Essential");
+    r.Check(s->window->IsEssential(e->tab) && e->home->IndexOf(e->tab) < 0, "now an Essential");
+    r.Check(e->home->essentials() && e->home->essentials()->IndexOf(e->tab) >= 0,
+            "in Home's own grid (separate-essentials)");
     r.Check(e->tab->pinned() && !e->tab->pinned_url().empty(), "pinned, with a pinned URL");
     r.Check(s->window->active_tab() == e->tab && s->window->active_essential() == e->tab,
             "still the selected tab");
     app->SaveNow();
     bool stored = false;
     for (const auto& w : app->store().LoadWorkspaces(prof->id())) {
-      if (w.kind != WorkspaceRecord::kKindEssentials) continue;
+      if (w.kind != WorkspaceRecord::kKindEssentials || w.owner_id != e->home->id()) continue;
       for (const auto& rec : app->store().LoadTabs(w.id)) stored = stored || rec.id == e->tab->id();
     }
-    r.Check(stored, "stored in the Essentials container");
+    r.Check(stored, "stored in Home's Essentials row");
   });
-  r.Add("Essentials are shared by every space", [s, e, app, &r] {
+  r.Add("the Essentials grid sits inside its rect, below the toolbar", [s, e, &r] {
+    s->window->ForceLayoutForTest();
+    const D2D1_RECT_F box = s->window->essentials_rect();
+    const auto tiles = s->window->essential_tile_rects();
+    r.Check(!tiles.empty() && box.bottom > box.top, "the grid has a rect");
+    bool inside = true;
+    for (const auto& t : tiles) {
+      inside = inside && t.top >= box.top && t.bottom <= box.bottom + 0.5f && t.left >= box.left - 0.5f &&
+               t.right <= box.right + 0.5f;
+    }
+    r.Check(inside, "every tile is inside the grid's rect");
+    if (s->window->toolbar_shown()) {
+      r.Check(box.top >= s->window->toolbar_rect().bottom, "below the toolbar");
+    }
+    r.Check(e->tab->HostWindow() == s->window, "an Essential's host window is the space's window");
+  });
+  r.Add("devtools: an Essential can be inspected", [s, e, &r] {
+    r.Check(s->window->active_tab() == e->tab, "the Essential is selected");
+    s->window->InspectElement(e->tab, 20, 20);
+  }, [s, e, &r] {
+    if (!e->tab->devtools_browser()) return false;
+    r.Check(s->window->DevToolsRectPx().right > s->window->DevToolsRectPx().left, "docked in the window");
+    s->window->HandleAccelerator(VK_F12, false, false, false);
+    return true;
+  }, 8000);
+  r.Add("devtools: closing them on an Essential", [] {}, [e] { return !e->tab->devtools_alive(); }, 8000);
+  r.Add("an Essential added in one space is not shown in another", [s, e, app, &r] {
     e->second = app->CreateWorkspace(s->window->profile(), L"Second", 0x4FB3A9);
     s->window->HandleAccelerator(VK_RIGHT, true, false, true);  // Ctrl+Alt+Right
     r.Check(s->window->workspace() == e->second, "switched to the second space");
     r.Check(s->window->active_tab() != e->tab, "the second space shows its own tab");
+    r.Check(!s->window->IsEssential(e->tab) && !s->window->essentials(),
+            "Second has no Essentials of its own yet");
     s->window->ActivateTab(e->tab);
-    r.Check(s->window->active_tab() == e->tab, "the Essential opens from the second space");
-  }, [e] { return e->tab->has_browser() && !e->tab->loading(); });
+    r.Check(s->window->active_tab() != e->tab, "Home's Essential does not open in Second");
+    bool listed = false;
+    for (const auto& item : s->window->AccessibleItems()) {
+      listed = listed || item.key == reinterpret_cast<intptr_t>(e->tab);
+    }
+    r.Check(!listed, "nor is it listed in Second's sidebar");
+  });
   r.Add("a space left on an Essential returns to it", [s, e, &r] {
     s->window->HandleAccelerator(VK_LEFT, true, false, true);  // back to Home (wraps)
     r.Check(s->window->workspace() == e->home, "back in Home");
-    s->window->ActivateTab(e->home->tabs().back().get());
+    r.Check(s->window->IsEssential(e->tab), "Home shows its Essential again");
+    s->window->ActivateTab(e->tab);
     s->window->HandleAccelerator(VK_RIGHT, true, false, true);
-    r.Check(s->window->active_tab() == e->tab, "Second restored its Essential");
+    r.Check(s->window->active_tab() != e->tab, "Second shows its own tab");
     s->window->HandleAccelerator(VK_LEFT, true, false, true);
-    r.Check(s->window->active_tab() != e->tab, "Home restored its own tab");
-  });
+    r.Check(s->window->active_tab() == e->tab, "Home restored its Essential");
+  }, [e] { return e->tab->has_browser() && !e->tab->loading(); });
   r.Add("Remove from Essentials puts it back into the current space, unpinned", [s, e, &r] {
     s->window->ActivateTab(e->tab);
     s->window->RemoveFromEssentials(e->tab);
-    r.Check(!s->window->profile()->IsEssential(e->tab) && e->home->IndexOf(e->tab) >= 0,
+    r.Check(!s->window->IsEssential(e->tab) && e->home->IndexOf(e->tab) >= 0,
             "in Home again");
     r.Check(!e->tab->pinned() && e->tab->pinned_url().empty(), "unpinned");
     r.Check(s->window->active_tab() == e->tab, "still selected");
@@ -1374,7 +1578,7 @@ void AddZenSuite(Runner& r) {
     for (Tab* t : added) t->RequestClose();
     extra->RequestClose();
   }, [s] {
-    const Workspace* ess = s->window->profile()->essentials();
+    const Workspace* ess = s->window->essentials();
     return ess && ess->tabs().empty();
   });
 
@@ -1725,6 +1929,21 @@ void AddZenSuite(Runner& r) {
     const float scale = static_cast<float>(::GetDpiForWindow(w->hwnd())) / 96.f;
     r.Check(w->multi_toolbar() && bar.bottom > bar.top && bar.top == 0.f, "a toolbar along the top");
     r.Check(field.top >= bar.top && field.bottom <= bar.bottom && field.left >= bar.left, "the URL field is in it");
+    r.Check(field.top - bar.top >= 5.f && bar.bottom - field.bottom >= 5.f, "with room above and below it");
+    r.Check(field.right - field.left <= 560.5f, "at most 560 wide by default");
+    set_pref(L"urlbar_wide", L"1");
+    const D2D1_RECT_F wide = w->address_rect();
+    r.Check(wide.right - wide.left > field.right - field.left || wide.right - wide.left > 559.f,
+            "the wide setting widens it (when there is room)");
+    set_pref(L"urlbar_wide", L"0");
+    // The buttons hug the field (one centred group), not the toolbar's ends.
+    bool hugged = false;
+    for (const auto& item : w->AccessibleItems()) {
+      if (item.name == L"Reload" || item.name == L"Stop") {
+        hugged = item.rect_dip.right <= field.left && field.left - item.rect_dip.right <= 8.f;
+      }
+    }
+    r.Check(hugged, "reload sits right next to the URL field");
     r.Check(static_cast<float>(page.top) >= bar.bottom * scale - 1.f, "the page starts below it");
     POINT close{static_cast<LONG>((bar.right - 10.f) * scale), static_cast<LONG>(10.f * scale)};
     ::ClientToScreen(w->hwnd(), &close);
@@ -1783,7 +2002,7 @@ void AddZenSuite(Runner& r) {
     const Workspace* ws = w->workspace();
     w->ActivateTab(ws->tabs().back().get());  // the last space tab
     w->HandleAccelerator(VK_TAB, true, false, false);
-    const Workspace* ess = w->profile()->essentials();
+    const Workspace* ess = w->essentials();
     r.Check(ess && !ess->tabs().empty() && w->active_tab() == ess->tabs().front().get(),
             "from the last space tab, Ctrl+Tab wraps into the Essentials");
     set_pref(L"ctrl_tab_ignore_essentials", L"1");
@@ -1965,7 +2184,7 @@ void AddZenSuite(Runner& r) {
         " await orbitAction('/api/essentials', {apps: [4]}); await orbitAction('/api/done'); })()", "", 0);
   }, [s, welcome, app, &r] {
     if (s->window->workspace()->IndexOf(*welcome) >= 0) return false;  // done closes the tab
-    const Workspace* ess = s->window->profile()->essentials();
+    const Workspace* ess = s->window->essentials();
     bool github = false;
     if (ess) {
       for (const auto& t : ess->tabs()) github |= t->url().rfind(L"https://github.com", 0) == 0;
@@ -2478,7 +2697,7 @@ void AddZenSuite(Runner& r) {
       if (records[i].id == second->id() && records[i + 1].id == first->id()) stored = true;
     }
     r.Check(stored, "the order is stored");
-    w->profile()->MoveWorkspace(first, 0);  // back
+    app->MoveSpace(first, 0);  // back
   });
 
   // URL bar results: engine suggestions follow the search row (setting, off
@@ -2712,13 +2931,475 @@ void AddZenSuite(Runner& r) {
     r.Check(!s->window->library_open(), "asking again closes it");
     return true;
   }, 8000);
+  // DevTools, docked beside the page.
+  auto dev_tab = std::make_shared<Tab*>(nullptr);
+  r.Add("devtools: F12 docks them beside the page", [s, dev_tab, &r] {
+    *dev_tab = s->window->active_tab();
+    r.Check(s->window->HandleAccelerator(VK_F12, false, false, false), "F12 handled");
+  }, [s, dev_tab, &r] {
+    Tab* t = *dev_tab;
+    if (!t->devtools_browser()) return false;
+    const RECT tools = s->window->DevToolsRectPx();
+    const RECT content = s->window->ContentRectPx();
+    RECT host{};
+    ::GetWindowRect(t->host(), &host);
+    r.Check(tools.right > tools.left && tools.right == content.right, "a pane at the right of the page area");
+    r.Check(host.right - host.left < content.right - content.left - (tools.right - tools.left) + 4,
+            "the page narrowed for it");
+    return true;
+  });
+  r.Add("devtools: Inspect selects an element in them", [s, dev_tab, &r] {
+    s->window->InspectElement(*dev_tab, 20, 20);
+    r.Check((*dev_tab)->devtools_open(), "still open");
+  });
+  r.Add("devtools: F12 again closes them", [s] {
+    s->window->HandleAccelerator(VK_F12, false, false, false);
+  }, [s, dev_tab] {
+    return !(*dev_tab)->devtools_alive() && s->window->DevToolsRectPx().right == 0;
+  });
+  // Linked window spaces (instead of Zen's window sync).
+  struct Linked {
+    Workspace* home = nullptr;
+    Workspace* space = nullptr;
+    BrowserWindow* window = nullptr;
+    Tab* tab = nullptr;
+    int browser_id = 0;
+    size_t windows_before = 0;
+    std::wstring name;
+    Workspace* doomed = nullptr;
+  };
+  auto ln = std::make_shared<Linked>();
+  r.Add("linked window: a tab with some history", [s, ln] {
+    ln->home = s->window->workspace();
+    ln->tab = s->window->OpenTab(TestUrl(L"t=LinkedFirst"), true);
+  }, [ln] { return ln->tab->record().title == L"LinkedFirst" && !ln->tab->loading(); });
+  r.Add("linked window: second page", [ln] { ln->tab->Navigate(TestUrl(L"t=LinkedPage")); },
+        [ln] { return ln->tab->record().title == L"LinkedPage" && !ln->tab->loading() && ln->tab->can_go_back(); });
+  r.Add("Move to → New window opens a linked space with the parent's profile", [s, ln, app, &r] {
+    ln->windows_before = app->windows().size();
+    ln->browser_id = ln->tab->browser()->GetIdentifier();
+    ln->window = s->window->TearOffTab(ln->tab);
+    r.Check(ln->window && app->windows().size() == ln->windows_before + 1, "a new window");
+    if (!ln->window) return;
+    ln->space = ln->window->workspace();
+    ln->name = ln->space->record().name;
+    r.Check(ln->space->is_linked() && ln->space->parent() == ln->home && ln->window->linked_space() == ln->space,
+            "it shows a linked space whose parent is the space the tab came from");
+    r.Check(ln->space->profile() == ln->home->profile() && ln->window->profile() == s->window->profile(),
+            "with the same profile (history, passwords, cookies)");
+    r.Check(ln->name == ln->home->record().name + L" · Window 2", "named '" + N(ln->name) + "'");
+    r.Check(ln->tab->workspace() == ln->space && ln->home->IndexOf(ln->tab) < 0 &&
+                ln->window->active_tab() == ln->tab && ln->tab->window() == ln->window,
+            "the tab moved there and is shown");
+    r.Check(ln->tab->has_browser() && ln->tab->browser()->GetIdentifier() == ln->browser_id && ln->tab->can_go_back(),
+            "with the same browser and its history");
+    r.Check(ln->window->essentials() == ln->home->essentials(), "it shows the parent's Essentials");
+    bool stored = false;
+    for (const auto& w : app->store().LoadWorkspaces(ln->space->profile()->id())) {
+      stored |= w.id == ln->space->id() && w.kind == WorkspaceRecord::kKindLinked && w.parent_id == ln->home->id();
+    }
+    r.Check(stored, "stored as a linked space of its parent");
+    const auto own = ln->window->Spaces();
+    const auto main = s->window->Spaces();
+    const auto all = app->Spaces();
+    r.Check(std::find(own.begin(), own.end(), ln->space) != own.end() &&
+                std::find(main.begin(), main.end(), ln->space) == main.end() &&
+                std::find(all.begin(), all.end(), ln->space) == all.end(),
+            "listed in its own window's switcher only");
+    bool row = false;
+    for (const auto& item : s->window->AccessibleItems()) {
+      row |= item.name == L"Linked window " + ln->name + L", 1 tab";
+    }
+    r.Check(s->window->LinkedChildren().size() == 1 && row, "the parent shows its folder row with 1 tab");
+  });
+  r.Add("closing the linked window brings the tab back in a folder", [ln] {
+    if (ln->window) ::SendMessageW(ln->window->hwnd(), WM_CLOSE, 0, 0);
+  }, [s, ln, app, &r] {
+    if (!ln->window) return true;  // reported by the step before
+    if (app->windows().size() != ln->windows_before) return false;
+    r.Check(ln->tab->workspace() == ln->home, "the tab is in the parent space again");
+    const TabGroupRecord* g = ln->home->FindGroup(ln->tab->record().group_id);
+    r.Check(g && g->name == ln->name, "in a folder named after the linked space");
+    r.Check(ln->tab->has_browser() && ln->tab->browser()->GetIdentifier() == ln->browser_id,
+            "still the same live browser (now in the parent's window)");
+    r.Check(!app->FindSpace(ln->space->id()) && s->window->LinkedChildren().empty(), "the linked space is gone");
+    bool stored = false;
+    for (const auto& w : app->store().LoadWorkspaces(ln->home->profile()->id())) {
+      stored |= w.kind == WorkspaceRecord::kKindLinked;
+    }
+    r.Check(!stored, "and its row");
+    s->window->UnpackFolder(ln->tab->record().group_id);
+    return true;
+  });
+  r.Add("the linked window's back arrow brings the tab back loose", [s, ln, app, &r] {
+    ln->window = s->window->TearOffTab(ln->tab);
+    r.Check(ln->window != nullptr, "torn off again");
+    if (!ln->window) return;
+    ln->space = ln->window->workspace();
+    app->BringBackLinkedSpace(ln->space);
+  }, [s, ln, app, &r] {
+    if (app->windows().size() != ln->windows_before) return false;
+    r.Check(ln->tab->workspace() == ln->home && ln->tab->record().group_id == 0, "back, not in a folder");
+    r.Check(s->window->LinkedChildren().empty(), "no linked row left");
+    return true;
+  });
+  r.Add("a linked space whose parent is deleted becomes a space", [s, ln, app, &r] {
+    ln->doomed = app->CreateWorkspace(s->window->profile(), L"Doomed", 0xE0905A);
+    s->window->SwitchToSpace(ln->doomed);
+    Tab* t = s->window->OpenTab(TestUrl(L"t=Orphan"), true);
+    ln->window = s->window->TearOffTab(t);
+    r.Check(ln->window && ln->window->workspace()->parent() == ln->doomed, "a linked window of 'Doomed'");
+    if (!ln->window) return;
+    ln->space = ln->window->workspace();
+    s->window->SwitchToSpace(ln->home);
+    app->store().DeleteWorkspace(ln->doomed->id());  // what Delete Space does
+    app->RetireWorkspace(ln->doomed);
+    r.Check(!ln->space->is_linked() && !ln->space->parent() && ln->window->workspace() == ln->space &&
+                !ln->window->linked_space(),
+            "its window keeps it, as an ordinary space");
+    const auto spaces = app->Spaces();
+    r.Check(std::find(spaces.begin(), spaces.end(), ln->space) != spaces.end(), "listed with the spaces");
+    bool stored = false;
+    for (const auto& w : app->store().LoadWorkspaces(ln->space->profile()->id())) {
+      stored |= w.id == ln->space->id() && w.kind == WorkspaceRecord::kKindSpace && w.parent_id == 0;
+    }
+    r.Check(stored, "stored as a space");
+    ::SendMessageW(ln->window->hwnd(), WM_CLOSE, 0, 0);
+  }, [ln, app] { return app->windows().size() == ln->windows_before; });
+  // Find in page (Ctrl+F).
+  struct Find {
+    Tab* tab = nullptr;
+    TestHttpServer server;
+  };
+  auto fd = std::make_shared<Find>();
+  r.Add("find in page: Ctrl+F opens the bar", [s, fd, &r] {
+    r.Check(fd->server.Start(), "test HTTP server listening");
+    fd->tab = s->window->OpenTab(
+        fd->server.Url(L"/text?t=FindMe&body=alpha+beta+alpha+beta+alpha"), true);
+  }, [s, fd, &r] {
+    if (fd->tab->loading() || fd->tab->record().title != L"FindMe" || s->window->active_tab() != fd->tab) return false;
+    static bool asked = false;
+    if (!asked) {
+      asked = true;
+      r.Check(s->window->HandleAccelerator('F', true, false, false), "Ctrl+F handled");
+      return false;
+    }
+    return FindBar::IsOpenFor(s->window) && FindBar::BrowserForTest() != nullptr;
+  }, 15000);
+  r.Add("find in page: a search counts and steps through the matches", [] {
+    FindBar::Search(L"alpha", true, false, false);
+  }, [&r] {
+    const FindBar::State st = FindBar::CurrentState();
+    if (st.count != 3 || st.active != 1) return false;  // the ordinal follows the count
+    r.Check(true, "three matches, the first active");
+    return true;
+  }, 10000);
+  r.Add("... next", [] { FindBar::Search(L"alpha", true, false, true); }, [&r] {
+    const FindBar::State st = FindBar::CurrentState();
+    if (st.active != 2) return false;
+    r.Check(st.count == 3, "the second of three");
+    return true;
+  }, 10000);
+  r.Add("... a miss reports no results", [] { FindBar::Search(L"zzz", true, false, false); }, [&r] {
+    const FindBar::State st = FindBar::CurrentState();
+    return st.count == 0 && st.active == 0 && FindBar::LastText() == L"zzz";
+  }, 10000);
+  r.Add("... case matters when asked", [] { FindBar::Search(L"ALPHA", true, true, false); }, [] {
+    return FindBar::CurrentState().count == 0 && FindBar::LastText() == L"ALPHA";
+  }, 5000);
+  r.Add("... Escape / close removes the bar", [] { FindBar::Close(); }, [s] {
+    return !FindBar::Alive() && !FindBar::IsOpenFor(s->window);
+  }, 10000);
+  // Saving a new login after sign-in.
+  struct Login {
+    Tab* tab = nullptr;
+    TestHttpServer server;
+  };
+  auto lg = std::make_shared<Login>();
+  r.Add("password: submitting a sign-in form offers to save it", [s, lg, &r] {
+    r.Check(lg->server.Start(), "test HTTP server listening");
+    passwords::ClearPendingOffer();
+    lg->tab = s->window->OpenTab(lg->server.Url(L"/login"), true);
+  }, [s, lg, &r] {
+    if (lg->tab->loading() || lg->tab->record().title != L"login" || !lg->tab->browser()) return false;
+    static bool asked = false;
+    if (!asked) {
+      asked = true;
+      lg->tab->browser()->GetMainFrame()->ExecuteJavaScript(
+          "document.getElementById('u').value='alice';document.getElementById('p').value='hunter2';"
+          "document.getElementById('f').requestSubmit();", "", 0);
+      return false;
+    }
+    if (!passwords::HasPendingOffer() || s->window->visible_toast_id() != L"save-password") return false;
+    r.Check(true, "the Save password toast is up and the offer is pending");
+    return true;
+  }, 15000);
+  r.Add("password: nothing is stored until Save is pressed, then it is", [s, lg, &r] {
+    Application* app = Application::Get();
+    const std::wstring origin = lg->server.Url(L"/").substr(0, lg->server.Url(L"/").size() - 1);
+    r.Check(app->store().FindPasswords(s->window->profile()->id(), origin).empty(), "not stored before the button");
+    r.Check(passwords::AcceptPendingOffer(), "the button's action stores it");
+    const auto stored = app->store().FindPasswords(s->window->profile()->id(), origin);
+    r.Check(stored.size() == 1 && stored[0].username == L"alice" && passwords::Unprotect(stored[0].secret) == L"hunter2",
+            "alice's password, protected");
+    r.Check(stored.size() == 1 && stored[0].secret.find(L"hunter2") == std::wstring::npos, "never in clear text");
+  });
+  r.Add("password: the same login again offers nothing", [s, lg, &r] {
+    passwords::ClearPendingOffer();
+    lg->tab->browser()->GetMainFrame()->ExecuteJavaScript(
+        "document.getElementById('u').value='alice';document.getElementById('p').value='hunter2';"
+        "document.getElementById('f').requestSubmit();", "", 0);
+  }, [] {
+    static int polls = 0;
+    return ++polls > 25 && !passwords::HasPendingOffer();
+  }, 15000);
+  r.Add("password: a changed password offers an update", [s, lg] {
+    lg->tab->browser()->GetMainFrame()->ExecuteJavaScript(
+        "document.getElementById('u').value='alice';document.getElementById('p').value='new-secret';"
+        "document.getElementById('f').requestSubmit();", "", 0);
+  }, [s, &r] {
+    if (!passwords::HasPendingOffer()) return false;
+    r.Check(passwords::AcceptPendingOffer(), "accepted");
+    const auto stored = Application::Get()->store().LoadPasswords(s->window->profile()->id());
+    bool ok = false;
+    for (const auto& p : stored) ok = ok || (p.username == L"alice" && passwords::Unprotect(p.secret) == L"new-secret");
+    r.Check(ok, "the saved password was replaced, not duplicated");
+    return true;
+  }, 15000);
   // The suite ends with the library open: the window close must wait for
   // (and not hang on) its browser.
   r.Add("left open for the shutdown", [s] {
     s->window->OpenLibrary();
     s->window->OpenThemePicker(s->window->workspace());  // and the theme picker
-  }, [s] { return s->window->library_browser_id() != 0 && s->window->theme_picker_browser_id() != 0; }, 8000);
+  }, [s] { return s->window->library_browser_id() != 0; }, 8000);  // the theme popup closes when the library takes focus
 }
+// Chrome extensions (Chrome-style browsers): an unpacked fixture is loaded at
+// launch (--orbit-test-extension, see run_selftests.ps1).
+void AddExtensionsSuite(Runner& r) {
+  Application* app = Application::Get();
+  struct State {
+    BrowserWindow* window = nullptr;
+    Profile* profile = nullptr;
+    Tab* page = nullptr;
+    Tab* manager = nullptr;
+    Tab* ext_page = nullptr;
+    std::string id;
+    uint64_t revision = 0;
+    TestHttpServer server;
+  };
+  auto s = std::make_shared<State>();
+  auto fixture = [s]() -> const ExtensionInfo* {
+    ExtensionBridge* bridge = Application::Get()->Extensions(s->profile);
+    if (!bridge) return nullptr;
+    for (const ExtensionInfo& e : bridge->extensions()) {
+      if (e.name == "Orbit Test Extension") return &e;
+    }
+    return nullptr;
+  };
+  auto run_js = [](Tab* t, const char* js) {
+    if (t && t->browser()) t->browser()->GetMainFrame()->ExecuteJavaScript(js, "", 0);
+  };
+  r.Add("window exists", [s, app] {
+    s->window = FirstWindowOf(app->profiles().front().get());
+    s->profile = s->window ? s->window->profile() : nullptr;
+  }, [s] { return s->window != nullptr && s->window->active_tab() != nullptr; });
+  r.Add("extension ids and popup paths are validated", [&r] {
+    r.Check(ExtensionBridge::IsExtensionId("ddkjiahejlhfcafbddmgiahcphecmpfh"), "a real id");
+    r.Check(!ExtensionBridge::IsExtensionId("DDKJIAHEJLHFCAFBDDMGIAHCPHECMPFH") &&
+                !ExtensionBridge::IsExtensionId("short") && !ExtensionBridge::IsExtensionId("'); alert(1);//aaaaaaaaaaaa"),
+            "rejects capitals, short and injected ids");
+    r.Check(ExtensionPopup::IsPopupPath("popup.html") && ExtensionPopup::IsPopupPath("/ui/popup.html?x=1#y"),
+            "plain relative paths");
+    r.Check(!ExtensionPopup::IsPopupPath("../x.html") && !ExtensionPopup::IsPopupPath("https://evil/") &&
+                !ExtensionPopup::IsPopupPath("a\b") && !ExtensionPopup::IsPopupPath(""),
+            "no traversal, scheme, backslash or empty path");
+  });
+  r.Add("installing an extension that opens a page does not open another browser window", [] {}, [s, app, &r] {
+    static ULONGLONG t0 = ::GetTickCount64();
+    if (::GetTickCount64() - t0 < 6000) return false;
+    struct Ctx { DWORD pid; std::vector<HWND> top; };
+    Ctx ctx{::GetCurrentProcessId(), {}};
+    ::EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+      auto* c = reinterpret_cast<Ctx*>(lp);
+      DWORD pid = 0;
+      ::GetWindowThreadProcessId(h, &pid);
+      if (pid == c->pid && ::IsWindowVisible(h) && !::GetWindow(h, GW_OWNER)) c->top.push_back(h);
+      return TRUE;
+    }, reinterpret_cast<LPARAM>(&ctx));
+    std::string classes;
+    for (HWND h : ctx.top) {
+      wchar_t cls[64] = {};
+      ::GetClassNameW(h, cls, 64);
+      classes += N(cls) + " ";
+    }
+    r.Log("  info top-level windows: " + classes);
+    r.Check(ctx.top.size() == app->windows().size(), "only Orbit's own windows are on screen");
+    bool welcome = false;
+    for (const auto& t : s->window->workspace()->tabs()) welcome = welcome || t->url().find(L"welcome.html") != std::wstring::npos;
+    r.Check(welcome, "the extension's page opened as a tab of the window");
+    return true;
+  }, 20000);
+  r.Add("a content script runs on a page it matches", [s, &r] {
+    r.Check(s->server.Start(), "test HTTP server listening");
+    s->page = s->window->OpenTab(s->server.Url(L"/page?t=ExtPage"), true);
+  }, [s, &r] {
+    const std::wstring& t = s->page->record().title;
+    if (t.empty() || t == L"ExtPage") return false;
+    r.Check(t == L"EXT:ExtPage:api", "the script ran and had chrome.runtime (title " + N(t) + ")");
+    return true;
+  }, 15000);
+  r.Add("the Web Store's wording says Orbit", [s] {
+    s->page = s->window->OpenTab(s->server.Url(L"/text?t=Store&body=Add+to+Chrome"), true);
+  }, [s, &r, run_js] {
+    if (s->page->loading() || !s->page->browser()) return false;
+    const std::wstring& title = s->page->record().title;
+    // (the test extension's content script retitles pages on this host)
+    if (title != L"EXT:Store:api" && title.rfind(L"TEXT:", 0) != 0) return false;
+    static int stage = 0;
+    if (stage == 0) {
+      stage = 1;
+      run_js(s->page, kStoreRename);
+      run_js(s->page, "setTimeout(() => { document.title = 'TEXT:' + document.body.innerText.trim(); }, 400);");
+      return false;
+    }
+    const std::wstring& t = s->page->record().title;
+    if (t.rfind(L"TEXT:", 0) != 0) return false;
+    r.Check(t == L"TEXT:Add to Orbit", "\"Add to Chrome\" now reads \"Add to Orbit\" (" + N(t) + ")");
+    return true;
+  }, 10000);
+  r.Add("the bridge lists the extension with its action", [s, app, fixture] {
+    app->Extensions(s->profile);  // starts the hidden chrome://extensions browser
+  }, [s, &r, fixture] {
+    const ExtensionInfo* e = fixture();
+    if (!e) return false;
+    s->id = e->id;
+    r.Check(e->enabled, "enabled");
+    r.Check(e->location == "UNPACKED", "loaded unpacked (" + e->location + ")");
+    r.Check(e->version == "1.0" && !e->description.empty(), "version and description");
+    r.Check(ExtensionBridge::IsExtensionId(e->id), "a valid extension id");
+    return true;
+  }, 20000);
+  r.Add("orbit://extensions shows it", [s] {
+    s->manager = s->window->OpenTab(L"orbit://extensions/", true);
+  }, [s, &r, run_js] {
+    if (s->manager->record().title != L"Extensions" && s->manager->record().title.rfind(L"CARDS:", 0) != 0) return false;
+    if (s->manager->loading()) return false;
+    static bool asked = false;
+    if (!asked) {
+      asked = true;
+      run_js(s->manager, "setTimeout(() => { const c = document.querySelectorAll('[role=listitem]');"
+                         "document.title = 'CARDS:' + c.length + ':' + (c[0] ? c[0].innerText.slice(0, 60) : ''); }, 600);");
+      return false;
+    }
+    const std::wstring& t = s->manager->record().title;
+    if (t.rfind(L"CARDS:", 0) != 0) return false;
+    r.Check(t.rfind(L"CARDS:1:Orbit Test Extension", 0) == 0, "one card, named (" + N(t) + ")");
+    return true;
+  }, 15000);
+  r.Add("turning it off stops its scripts, turning it on restores them", [s, app, fixture] {
+    s->revision = app->Extensions(s->profile)->revision();
+    app->Extensions(s->profile)->SetEnabled(s->id, false);
+  }, [s, app, fixture] {
+    const ExtensionInfo* e = fixture();
+    return e && !e->enabled && app->Extensions(s->profile)->revision() != s->revision;
+  }, 15000);
+  r.Add("... a page opened now is not touched", [s] {
+    s->page = s->window->OpenTab(s->server.Url(L"/page?t=ExtOff"), true);
+  }, [s, &r] {
+    if (s->page->loading() || s->page->record().title.empty()) return false;
+    static int polls = 0;
+    if (++polls < 20) return false;  // give a script every chance to (wrongly) run
+    r.Check(s->page->record().title == L"ExtOff", "title untouched (" + N(s->page->record().title) + ")");
+    return true;
+  }, 15000);
+  r.Add("... and on again", [s, app] {
+    app->Extensions(s->profile)->SetEnabled(s->id, true);
+  }, [s, fixture] {
+    const ExtensionInfo* e = fixture();
+    return e && e->enabled;
+  }, 15000);
+  r.Add("... and its scripts run again", [s] {
+    s->page = s->window->OpenTab(s->server.Url(L"/page?t=ExtBack"), true);
+  }, [s, &r] {
+    const std::wstring& t = s->page->record().title;
+    if (t.empty() || t == L"ExtBack") return false;
+    r.Check(t == L"EXT:ExtBack:api", "the content script ran after re-enabling (" + N(t) + ")");
+    return true;
+  }, 15000);
+  r.Add("its action popup opens and runs", [s, &r, fixture] {
+    const ExtensionInfo* e = fixture();
+    r.Check(e && e->popup == "popup.html", "the bridge found the popup path");
+    s->page = s->window->OpenTab(s->server.Url(L"/page?t=PopupTarget"), true);
+  }, [s, &r, fixture] {
+    static int stage = 0;
+    const ExtensionInfo* e = fixture();
+    if (!e || s->page->loading() || !s->page->browser() || s->page->record().title.empty()) return false;
+    if (stage == 0) {
+      stage = 1;
+      POINT at{200, 200};
+      ExtensionPopup::Open(s->window, *e, at);
+      return false;
+    }
+    const std::wstring title = ExtensionPopup::CurrentTitle();
+    if (title.rfind(L"POPUP:", 0) != 0) return false;
+    r.Check(title.rfind(L"POPUP:", 0) == 0, "the popup page ran with the extension APIs (" + N(title) + ")");
+    r.Check(ExtensionPopup::CurrentWindow() != nullptr && ::IsWindowVisible(ExtensionPopup::CurrentWindow()), "shown");
+    return true;
+  }, 20000);
+  r.Add("... and closes", [] { ExtensionPopup::CloseCurrent(); }, [] { return !ExtensionPopup::Alive(); }, 10000);
+  r.Add("an extension page cannot call orbit:// APIs", [s] {
+    s->ext_page = s->window->OpenTab(FromUtf8("chrome-extension://" + s->id + "/popup.html"), true);
+  }, [s, &r, run_js] {
+    if (s->ext_page->loading() || !s->ext_page->browser()) return false;
+    static bool asked = false;
+    if (!asked) {
+      asked = true;
+      run_js(s->ext_page,
+             "fetch('orbit://history/api/list', {headers: {'X-Orbit-Request': '1'}})"
+             ".then(r => document.title = 'REACHED:' + r.status, e => document.title = 'BLOCKED');");
+      return false;
+    }
+    const std::wstring& t = s->ext_page->record().title;
+    if (t != L"BLOCKED" && t.rfind(L"REACHED", 0) != 0) return false;
+    r.Check(t == L"BLOCKED", "the request never reached the API (" + N(t) + ")");
+    return true;
+  }, 15000);
+  r.Add("a web page cannot either", [s] {
+    s->page = s->window->OpenTab(s->server.Url(L"/page?t=WebTry"), true);
+  }, [s, &r, run_js] {
+    if (s->page->loading() || !s->page->browser() || s->page->record().title.empty()) return false;
+    static bool asked = false;
+    if (!asked) {
+      asked = true;
+      run_js(s->page,
+             "fetch('orbit://history/api/list', {headers: {'X-Orbit-Request': '1'}})"
+             ".then(r => document.title = 'REACHED:' + r.status, e => document.title = 'BLOCKED');");
+      return false;
+    }
+    const std::wstring& t = s->page->record().title;
+    if (t != L"BLOCKED" && t.rfind(L"REACHED", 0) != 0) return false;
+    r.Check(t == L"BLOCKED", "blocked (" + N(t) + ")");
+    return true;
+  }, 15000);
+  r.Add("private windows run no extensions", [s, app] {
+    s->window = app->OpenPrivateWindow();
+  }, [s, app, &r] {
+    if (!s->window || !s->window->active_tab()) return false;
+    r.Check(app->Extensions(s->window->profile()) == nullptr, "no bridge for a private profile");
+    return true;
+  });
+  r.Add("... a matching page there is untouched", [s] {
+    s->page = s->window->OpenTab(s->server.Url(L"/page?t=PrivPage"), true);
+  }, [s, &r] {
+    if (s->page->loading() || s->page->record().title.empty()) return false;
+    static int polls = 0;
+    if (++polls < 20) return false;
+    r.Check(s->page->record().title == L"PrivPage", "no content script in a private window (" + N(s->page->record().title) + ")");
+    return true;
+  }, 15000);
+}
+
+
 }  // namespace
 
 bool IsActive() { return g_active; }
@@ -2801,6 +3482,8 @@ void Start(const std::wstring& suite) {
     AddRestorePhase3(*g_runner);
   } else if (suite == L"zen") {
     AddZenSuite(*g_runner);
+  } else if (suite == L"extensions") {
+    AddExtensionsSuite(*g_runner);
   } else {
     g_runner->Check(false, "unknown suite " + N(suite));
   }

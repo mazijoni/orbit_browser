@@ -1,6 +1,7 @@
 #include "app/orbit_app.h"
 
 #include "app/application.h"
+#include "browser/default_client.h"
 #include "app/self_test.h"
 #include "browser/internal_pages.h"
 #include "core/strings.h"
@@ -48,6 +49,74 @@ constexpr char kGlanceListener[] = R"js((function (send, trigger) {
 // ZenWindowDragChild: a left press in the top 5% of the top-level page, not
 // over anything the page wants to click, select, drag or scroll, starts a
 // window move once it has moved 4 px. Trusted events only.
+// The Chrome Web Store only offers "Add to Chrome" to browsers whose client
+// hints name Google Chrome; this Chromium build names only Chromium. Applied
+// to the store's own pages only.
+constexpr char kStoreBrand[] = R"js((function () {
+  if (typeof NavigatorUAData === 'undefined') return;
+  const brands = [{brand: 'Not A(Brand', version: '99'}, {brand: 'Chromium', version: '154'},
+                  {brand: 'Google Chrome', version: '154'}];
+  Object.defineProperty(NavigatorUAData.prototype, 'brands', {get() { return brands; }, configurable: true});
+})())js";
+
+bool IsChromeWebStoreUrl(const std::string& url) {
+  return url.rfind("https://chromewebstore.google.com/", 0) == 0 ||
+         url.rfind("https://chrome.google.com/webstore", 0) == 0;
+}
+
+// Password capture: remembers the last non-empty password a form held and
+// reports it (username, password) when the form is submitted or the page is
+// left. The browser decides whether to offer saving it.
+constexpr char kPasswordCapture[] = R"js((function (send) {
+  let last = null, sent = false;
+  const userOf = (pw) => {
+    const inputs = Array.from((pw.form || document).querySelectorAll('input'));
+    for (let i = inputs.indexOf(pw) - 1; i >= 0; --i) {
+      const t = (inputs[i].type || 'text').toLowerCase();
+      if ((t === 'text' || t === 'email' || t === 'tel') && inputs[i].value) return inputs[i].value;
+    }
+    return '';
+  };
+  const remember = (scope) => {
+    const root = scope && scope.querySelectorAll ? scope : document;
+    const pws = Array.from(root.querySelectorAll('input[type=password]')).filter((i) => i.value);
+    if (!pws.length) return;
+    last = {u: userOf(pws[0]), p: pws[0].value};
+    sent = false;
+  };
+  const flush = () => {
+    if (last && !sent && last.p.length <= 256 && last.u.length <= 256) { sent = true; send(last.u, last.p); }
+  };
+  document.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t && t.type === 'password') remember(t.form || document);
+  }, true);
+  document.addEventListener('submit', (e) => { remember(e.target); flush(); }, true);
+  window.addEventListener('pagehide', flush);
+}))js";
+
+class PasswordSender : public CefV8Handler {
+ public:
+  bool Execute(const CefString&, CefRefPtr<CefV8Value>, const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>&, CefString&) override {
+    if (arguments.size() != 2 || !arguments[0]->IsString() || !arguments[1]->IsString()) return true;
+    const CefString user = arguments[0]->GetStringValue();
+    const CefString password = arguments[1]->GetStringValue();
+    if (password.empty() || user.size() > 256 || password.size() > 256) return true;
+    CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+    CefRefPtr<CefFrame> frame = context ? context->GetFrame() : nullptr;
+    if (!frame || !frame->IsMain()) return true;
+    CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create(kPasswordSubmitMessage);
+    message->GetArgumentList()->SetString(0, user);
+    message->GetArgumentList()->SetString(1, password);
+    frame->SendProcessMessage(PID_BROWSER, message);
+    return true;
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(PasswordSender);
+};
+
 constexpr char kWindowDragListener[] = R"js((function (send) {
   const interactive = new Set(['a', 'button', 'input', 'select', 'textarea', 'label', 'summary', 'details',
       'option', 'audio', 'video', 'canvas', 'iframe', 'embed', 'object', 'img', 'svg']);
@@ -211,6 +280,46 @@ constexpr char kBoostPicker[] = R"js((function (send) {
   return (next) => { mode = next === 'zap' || next === 'focus' ? next : ''; if (!mode && box) box.remove(); };
 }))js";
 
+// Fills a saved login into the page. Installed per main frame; the browser
+// calls it with (username, password) once it has matched the page's origin.
+// Only visible, enabled, same-form fields are touched, and events are fired
+// so the site's own validation runs.
+constexpr char kAutofillInstaller[] = R"js((function () {
+  const visible = (el) => {
+    if (!el || el.disabled || el.readOnly || el.type === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const st = getComputedStyle(el);
+    return st.visibility !== 'hidden' && st.display !== 'none';
+  };
+  const setValue = (el, value) => {
+    const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+    el.focus();
+    if (setter && setter.set) setter.set.call(el, value); else el.value = value;
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+    el.blur();
+  };
+  return (username, password) => {
+    const pwFields = Array.from(document.querySelectorAll('input[type=password]')).filter(visible);
+    if (!pwFields.length) return;
+    const pw = pwFields[0];
+    setValue(pw, password);
+    if (username) {
+      const form = pw.form;
+      const candidates = Array.from((form || document).querySelectorAll(
+          'input[type=text],input[type=email],input[type=tel],input:not([type])')).filter(visible);
+      // The username field is the visible text field just before the password.
+      let user = null;
+      for (const c of candidates) {
+        if (pw.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_PRECEDING) user = c; else break;
+      }
+      if (user) setValue(user, username);
+    }
+  };
+}))js";
+
 class BoostPickSender : public CefV8Handler {
  public:
   bool Execute(const CefString&, CefRefPtr<CefV8Value>, const CefV8ValueList& arguments,
@@ -276,12 +385,19 @@ void OrbitApp::OnBrowserCreated(CefRefPtr<CefBrowser> browser,
 
 void OrbitApp::OnBrowserDestroyed(CefRefPtr<CefBrowser> browser) {
   pickers_.erase(browser->GetIdentifier());
+  autofill_.erase(browser->GetIdentifier());
   glance_trigger_.erase(browser->GetIdentifier());
   window_drag_.erase(browser->GetIdentifier());
 }
 
 void OrbitApp::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                                 CefRefPtr<CefV8Context> context) {
+  if (IsChromeWebStoreUrl(frame->GetURL().ToString())) {
+    CefRefPtr<CefV8Value> ignored;
+    CefRefPtr<CefV8Exception> brand_exception;
+    context->Eval(kStoreBrand, CefString(), 0, ignored, brand_exception);
+    context->Eval(kStoreRename, CefString(), 0, ignored, brand_exception);
+  }
   // Pages only (the browser's own orbit:// pages play nothing).
   if (frame->GetURL().ToString().rfind("orbit:", 0) != 0 && frame->IsMain()) {
     // Boosts' picker, controlled from the browser (kBoostPickModeMessage).
@@ -291,6 +407,23 @@ void OrbitApp::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFram
       CefV8ValueList args{CefV8Value::CreateFunction("send", new BoostPickSender())};
       CefRefPtr<CefV8Value> control = installer->ExecuteFunction(nullptr, args);
       if (control && control->IsFunction()) pickers_[browser->GetIdentifier()] = {context, control};
+    }
+    // Password autofill: the fill function, called when the browser pushes a
+    // matched credential (kAutofillMessage).
+    if (frame->IsMain()) {
+      CefRefPtr<CefV8Value> filler;
+      CefRefPtr<CefV8Exception> fx;
+      if (context->Eval(kAutofillInstaller, CefString(), 0, filler, fx) && filler && filler->IsFunction()) {
+        CefRefPtr<CefV8Value> fill = filler->ExecuteFunction(nullptr, {});
+        if (fill && fill->IsFunction()) autofill_[browser->GetIdentifier()] = {context, fill};
+      }
+      // New logins: offered for saving when a form with a password is submitted.
+      CefRefPtr<CefV8Value> capture;
+      CefRefPtr<CefV8Exception> cx;
+      if (context->Eval(kPasswordCapture, CefString(), 0, capture, cx) && capture && capture->IsFunction()) {
+        CefV8ValueList args{CefV8Value::CreateFunction("send", new PasswordSender())};
+        capture->ExecuteFunction(nullptr, args);
+      }
     }
   }
   if (frame->GetURL().ToString().rfind("orbit:", 0) != 0) {
@@ -336,6 +469,11 @@ void OrbitApp::OnBeforeCommandLineProcessing(const CefString& process_type,
   if (process_type.empty() && command_line->HasSwitch("orbit-self-test")) {
     command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
   }
+  // Self-test of the extension host: an unpacked fixture loaded at launch.
+  if (process_type.empty() && command_line->HasSwitch("orbit-test-extension")) {
+    command_line->AppendSwitchWithValue("load-extension",
+                                        command_line->GetSwitchValue("orbit-test-extension"));
+  }
 }
 
 bool OrbitApp::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
@@ -350,6 +488,18 @@ bool OrbitApp::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
     if (it != pickers_.end() && args->GetSize() == 1 && args->GetType(0) == VTYPE_STRING &&
         it->second.first->IsValid() && it->second.first->Enter()) {
       CefV8ValueList call{CefV8Value::CreateString(args->GetString(0))};
+      it->second.second->ExecuteFunction(nullptr, call);
+      it->second.first->Exit();
+    }
+    return true;
+  }
+  if (source_process == PID_BROWSER && message->GetName() == kAutofillMessage) {
+    const auto it = autofill_.find(browser->GetIdentifier());
+    CefRefPtr<CefListValue> args = message->GetArgumentList();
+    if (it != autofill_.end() && args->GetSize() == 2 && it->second.first->IsValid() &&
+        it->second.first->Enter()) {
+      CefV8ValueList call{CefV8Value::CreateString(args->GetString(0)),
+                          CefV8Value::CreateString(args->GetString(1))};
       it->second.second->ExecuteFunction(nullptr, call);
       it->second.first->Exit();
     }
@@ -391,6 +541,11 @@ std::vector<std::wstring> OrbitApp::UrlsFromCommandLine(
     if (urls.size() >= 20) break;  // bound work from a single launch
   }
   return urls;
+}
+
+CefRefPtr<CefClient> OrbitApp::GetDefaultClient() {
+  static CefRefPtr<DefaultClient> client = new DefaultClient();
+  return client;
 }
 
 void OrbitApp::OnContextInitialized() {

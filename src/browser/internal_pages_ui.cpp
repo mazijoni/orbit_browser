@@ -290,6 +290,7 @@ InternalResponse SettingsPage(const InternalRequest& req) {
     <div class="row" style="padding-left:0"><label class="grow" for="urlbar">Address bar</label>
       <select id="urlbar"><option value="normal">Normal</option><option value="floating-on-type">Floating only when typing</option><option value="float">Always floating</option></select></div>
     <div class="row" style="padding-left:0"><label class="grow" for="greyOut">Grey out inactive windows</label><input type="checkbox" id="greyOut"></div>
+    <div class="row" style="padding-left:0"><label class="grow" for="urlbarWide">Wide URL bar (multiple toolbars)</label><input type="checkbox" id="urlbarWide"></div>
     <div class="row" style="padding-left:0"><label class="grow" for="dragFromContent">Drag the window from the top of the page (applies to newly opened pages)</label><input type="checkbox" id="dragFromContent"></div>
     <div class="row" style="padding-left:0"><label class="grow" for="quickActions">Suggest quick actions in the address bar</label><input type="checkbox" id="quickActions"></div>
     <div class="row" style="padding-left:0"><label class="grow" for="glance">Glance: preview links with a modifier+click</label><input type="checkbox" id="glance"></div>
@@ -358,6 +359,24 @@ InternalResponse SettingsPage(const InternalRequest& req) {
     <div id="kbsNote" class="muted" style="min-height:18px"></div>
     <div id="kbs"></div>
   </div>
+  <h2>Import from another browser</h2>
+  <div class="card">
+    <div class="muted" style="margin:0 0 8px">Bring your bookmarks, saved passwords and history from another browser on this computer. Everything stays on this machine.</div>
+    <div class="row" style="padding-left:0"><label class="grow" for="importSource">Browser</label>
+      <select id="importSource"><option value="">Detecting…</option></select></div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px">
+      <label><input type="checkbox" id="iBookmarks" checked> Bookmarks</label>
+      <label><input type="checkbox" id="iPasswords" checked> Passwords</label>
+      <label><input type="checkbox" id="iHistory"> History</label>
+    </div>
+    <button id="importRun" class="primary">Import</button> <span id="importStatus" class="muted"></span>
+  </div>
+  <h2>Saved passwords</h2>
+  <div class="card">
+    <div class="row" style="padding-left:0"><label class="grow" for="autofillPasswords">Fill saved passwords into sign-in forms</label><input type="checkbox" id="autofillPasswords"></div>
+    <div class="toolbar" style="margin:6px 0"><input type="search" id="pwFilter" placeholder="Search passwords" style="flex:1" aria-label="Search passwords"></div>
+    <div id="passwords" class="muted">No saved passwords.</div>
+  </div>
   <h2>Site permissions</h2>
   <div class="card" id="perms"></div>
   <h2>Privacy</h2>
@@ -417,11 +436,12 @@ async function set(key, value) {
                  card('collapsed', 'Collapsed toolbar', true, false));
   for (const [id, key] of [['newtabButton', 'newtab_button'], ['newtabTop', 'newtab_button_top'],
                            ['ctrlTabSkipPending', 'ctrl_tab_skip_pending'], ['glance', 'glance_enabled'],
-                           ['greyOut', 'grey_out_inactive'], ['dragFromContent', 'drag_window_from_content'],
+                           ['greyOut', 'grey_out_inactive'], ['urlbarWide', 'urlbar_wide'], ['dragFromContent', 'drag_window_from_content'],
                            ['quickActions', 'quick_actions'], ['tabsRight', 'tabs_right'],
                            ['compactFlash', 'compact_flash'], ['searchSuggestions', 'search_suggestions'],
                            ['ctrlTabWithin', 'ctrl_tab_ignore_essentials'],
-                           ['continueLeftOff', 'continue_where_left_off']]) {
+                           ['continueLeftOff', 'continue_where_left_off'],
+                           ['autofillPasswords', 'autofill_passwords']]) {
     const box = document.getElementById(id);
     box.checked = s[id];
     box.addEventListener('change', () => set(key, box.checked ? '1' : '0'));
@@ -490,6 +510,67 @@ async function set(key, value) {
       : [el('p', {class: 'muted', style: 'margin:0'}, 'No site has asked for permissions yet. Sites must ask before using your camera, microphone, location or similar features.')]));
   }
   loadPerms();
+)js";
+  script += R"js(
+  // Import from another browser.
+  const importSource = document.getElementById('importSource');
+  const importStatus = document.getElementById('importStatus');
+  async function loadSources() {
+    if (s.private) { importSource.replaceChildren(el('option', {value: ''}, 'Not available in private windows')); return; }
+    const {items} = await (await fetch('/api/import-sources')).json();
+    if (!items.length) { importSource.replaceChildren(el('option', {value: ''}, 'No other browser found')); return; }
+    importSource.replaceChildren(...items.map(it => {
+      const bits = [it.bookmarks && 'bookmarks', it.passwords && 'passwords', it.history && 'history'].filter(Boolean);
+      return el('option', {value: String(it.index)}, it.name + (bits.length ? ' (' + bits.join(', ') + ')' : ''));
+    }));
+  }
+  loadSources();
+  document.getElementById('importRun').addEventListener('click', async () => {
+    const index = importSource.value;
+    if (index === '') return;
+    importStatus.textContent = 'Importing…';
+    try {
+      const r = await orbitAction('/api/import-run', {index: Number(index),
+        bookmarks: document.getElementById('iBookmarks').checked,
+        passwords: document.getElementById('iPasswords').checked,
+        history: document.getElementById('iHistory').checked});
+      importStatus.textContent = 'Imported ' + r.bookmarks + ' bookmarks, ' + r.passwords + ' passwords, ' + r.history + ' history entries.';
+      loadPasswords();
+    } catch (e) { importStatus.textContent = 'Import failed.'; }
+  });
+
+  // Saved passwords.
+  const pwBox = document.getElementById('passwords'), pwFilter = document.getElementById('pwFilter');
+  let allPw = [];
+  function renderPasswords() {
+    const q = pwFilter.value.toLowerCase();
+    const items = allPw.filter(p => !q || p.origin.toLowerCase().includes(q) || p.username.toLowerCase().includes(q));
+    if (!items.length) { pwBox.className = 'muted'; pwBox.replaceChildren(document.createTextNode(allPw.length ? 'No matches.' : 'No saved passwords. Import them from another browser above.')); return; }
+    pwBox.className = '';
+    pwBox.replaceChildren(...items.map(p => {
+      const secret = el('input', {type: 'password', value: '••••••••', readonly: true,
+        style: 'flex:1;min-width:0;background:transparent;border:0;color:inherit'});
+      let shown = false;
+      const reveal = el('button', {onclick: async () => {
+        if (shown) { secret.type = 'password'; secret.value = '••••••••'; reveal.textContent = 'Show'; shown = false; return; }
+        const r = await (await fetch('/api/password-reveal', {method: 'POST', headers: {'X-Orbit-Request': '1'}, body: JSON.stringify({id: p.id})})).json();
+        if (r.password !== undefined) { secret.type = 'text'; secret.value = r.password; reveal.textContent = 'Hide'; shown = true; }
+      }}, 'Show');
+      return el('div', {class: 'row', style: 'padding-left:0;gap:10px'},
+        el('div', {class: 'grow', style: 'min-width:0'}, el('div', {class: 'title'}, p.origin),
+           el('div', {class: 'sub'}, p.username || '(no username)')),
+        secret, reveal,
+        el('button', {onclick: async () => { await orbitAction('/api/password-delete', {id: p.id}); loadPasswords(); }}, 'Delete'));
+    }));
+  }
+  async function loadPasswords() {
+    if (s.private) { pwBox.textContent = 'Not available in private windows.'; return; }
+    const r = await (await fetch('/api/passwords')).json();
+    allPw = r.items || [];
+    renderPasswords();
+  }
+  pwFilter.addEventListener('input', renderPasswords);
+  loadPasswords();
 
   // Keyboard Shortcuts (gZenCKSSettings): click a key to record a new one;
   // Backspace disables, Escape cancels; conflicts ask before replacing.
@@ -644,6 +725,130 @@ load();
 setInterval(() => { if (!document.hidden) load(); }, 2000);  // only while visible
 )js";
   return {200, "text/html", PageShell("Loading", body, script)};
+}
+
+InternalResponse ExtensionsPage(const InternalRequest& req) {
+  const std::string body = R"html(
+<main>
+  <h1>Extensions</h1>
+  <p class="muted" id="intro">Extensions add features to the pages you visit. They run in normal windows, not in private ones, and each profile has its own.</p>
+  <div class="toolbar">
+    <button id="store" class="primary">Get extensions</button>
+    <button id="unpacked">Load unpacked…</button>
+    <label style="margin-left:auto"><input type="checkbox" id="dev" role="switch"> Developer mode</label>
+  </div>
+  <div id="error" class="card" role="alert" hidden></div>
+  <div id="list" role="list"></div>
+</main>)html";
+  std::string script = kDomHelpers;
+  script += R"js(
+const list = document.getElementById('list');
+const errorBox = document.getElementById('error');
+let revision = -1, timer = null, expanded = new Set();
+function act(name, id, extra) { return orbitAction('/api/' + name, Object.assign({id}, extra || {})); }
+function card(x) {
+  const open = expanded.has(x.id);
+  const icon = x.icon ? el('img', {src: x.icon, alt: '', width: 40, height: 40, style: 'border-radius:8px;flex:none'})
+                      : el('div', {style: 'width:40px;height:40px;border-radius:8px;background:var(--surface2);flex:none;display:flex;align-items:center;justify-content:center;font-weight:600'}, (x.name || '?').slice(0, 1).toUpperCase());
+  const toggle = el('input', {type: 'checkbox', role: 'switch', 'aria-label': (x.enabled ? 'Turn off ' : 'Turn on ') + x.name, disabled: !x.mayDisable,
+    onchange: (e) => { act('enable', x.id, {enabled: e.target.checked}); } });
+  toggle.checked = x.enabled;
+  const buttons = [el('button', {onclick: () => { open ? expanded.delete(x.id) : expanded.add(x.id); render(last); }}, open ? 'Hide details' : 'Details')];
+  if (x.options) buttons.push(el('button', {onclick: () => act('open-options', x.id)}, 'Options'));
+  if (x.home) buttons.push(el('button', {onclick: () => orbitAction('/api/open', {url: x.home})}, 'Website'));
+  if (x.mayDisable) buttons.push(el('button', {class: 'danger', onclick: () => act('remove', x.id)}, 'Remove'));
+  const perms = x.permissions.length ? x.permissions : ['No special permissions'];
+  return el('div', {class: 'card', role: 'listitem', style: 'opacity:' + (x.enabled ? 1 : 0.7)},
+    el('div', {style: 'display:flex;gap:12px;align-items:center'}, icon,
+      el('div', {style: 'flex:1;min-width:0'},
+        el('div', {style: 'font-weight:600'}, x.name, el('span', {class: 'muted', style: 'font-weight:400;margin-left:8px'}, 'v' + x.version + (x.location === 'UNPACKED' ? ' · unpacked' : ''))),
+        el('div', {class: 'sub'}, x.description)),
+      toggle),
+    el('div', {style: 'display:flex;gap:6px;margin-top:10px;flex-wrap:wrap'}, buttons),
+    open ? el('div', {style: 'margin-top:10px'}, el('div', {class: 'muted', style: 'font-size:12px;margin-bottom:4px'}, 'This extension can'),
+                el('ul', {style: 'margin:0;padding-left:18px'}, perms.map((p) => el('li', {}, p)))) : null);
+}
+let last = null;
+function render(data) {
+  last = data;
+  document.title = 'Extensions';
+  if (!data.available) {
+    list.replaceChildren(el('p', {class: 'empty'}, 'Extensions are not available in private windows.'));
+    document.getElementById('store').disabled = true; document.getElementById('unpacked').disabled = true;
+    return;
+  }
+  document.getElementById('dev').checked = !!data.developer;
+  document.getElementById('unpacked').disabled = !data.developer;
+  document.getElementById('unpacked').title = data.developer ? '' : 'Turn on Developer mode to load an unpacked extension';
+  errorBox.hidden = !data.error;
+  errorBox.textContent = data.error || '';
+  if (!data.ready && !data.extensions.length) { list.replaceChildren(el('p', {class: 'empty'}, 'Loading extensions…')); return; }
+  list.replaceChildren(...(data.extensions.length ? data.extensions.map(card) :
+    [el('p', {class: 'empty'}, 'No extensions yet. Get extensions opens the Chrome Web Store; add one there and it shows up here.')]));
+}
+async function load() {
+  try {
+    const data = await (await fetch('/api/list')).json();
+    if (data.revision !== revision || !data.ready) { revision = data.revision; render(data); }
+  } catch (e) {}
+  clearTimeout(timer);
+  timer = setTimeout(load, 1500);
+}
+document.getElementById('store').addEventListener('click', () => orbitAction('/api/open-store', {}));
+document.getElementById('unpacked').addEventListener('click', () => orbitAction('/api/load-unpacked', {}));
+document.getElementById('dev').addEventListener('change', (e) => orbitAction('/api/developer-mode', {enabled: e.target.checked}));
+load();
+)js";
+  return {200, "text/html", PageShell("Loading", body, script)};
+}
+
+InternalResponse FindPage(const InternalRequest& req) {
+  const std::string body = R"html(
+<style>
+html,body{overflow:hidden;height:100%}
+main{max-width:none;margin:0;padding:0;height:100%;display:flex;align-items:center;gap:6px;padding:0 10px}
+#q{flex:1;min-width:0}
+#count{min-width:54px;text-align:right;font-size:12px}
+button{padding:6px 9px}
+label{display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;user-select:none}
+</style>
+<main>
+  <input id="q" type="search" placeholder="Find in page" aria-label="Find in page" autocomplete="off" spellcheck="false">
+  <span id="count" class="muted" aria-live="polite"></span>
+  <button id="prev" title="Previous (Shift+Enter)" aria-label="Previous match">&#8593;</button>
+  <button id="next" title="Next (Enter)" aria-label="Next match">&#8595;</button>
+  <label title="Match case"><input type="checkbox" id="case"> Aa</label>
+  <button id="close" title="Close (Esc)" aria-label="Close">&#10005;</button>
+</main>)html";
+  std::string script = R"js(
+const q = document.getElementById('q'), countEl = document.getElementById('count'), caseEl = document.getElementById('case');
+let last = '';
+function search(forward, next) {
+  return orbitAction('/api/search', {text: q.value, forward, matchCase: caseEl.checked, next});
+}
+async function refresh() {
+  try {
+    const s = await (await fetch('/api/state')).json();
+    if (!s.open) return;
+    countEl.textContent = q.value ? (s.count ? s.active + '/' + s.count : 'No results') : '';
+  } catch (e) {}
+}
+q.addEventListener('input', () => { last = q.value; search(true, false).then(refresh); });
+q.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); search(!e.shiftKey, true).then(refresh); }
+  else if (e.key === 'Escape') { e.preventDefault(); orbitAction('/api/close', {}); }
+});
+document.getElementById('next').addEventListener('click', () => search(true, true).then(refresh));
+document.getElementById('prev').addEventListener('click', () => search(false, true).then(refresh));
+caseEl.addEventListener('change', () => search(true, false).then(refresh));
+document.getElementById('close').addEventListener('click', () => orbitAction('/api/close', {}));
+window.orbitFocusFind = () => { q.focus(); q.select(); };
+// The text of the last search, when the bar is opened again.
+fetch('/api/state').then(r => r.json()).then((s) => { if (s.text) { q.value = s.text; } orbitFocusFind(); });
+setInterval(refresh, 250);
+document.title = 'Find in page';
+)js";
+  return {200, "text/html", PageShell("Find in page", body, script)};
 }
 
 }  // namespace orbit

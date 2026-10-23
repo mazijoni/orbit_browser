@@ -131,6 +131,52 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
     body = "<!doctype html><title>media</title><audio id=a src=\"/tone.wav\" loop></audio><script>"
            "navigator.mediaSession.metadata = new MediaMetadata({title: 'Orbit Tone', artist: 'Self Test'});"
            "a.play().then(() => document.title = 'PLAYING');</script>";
+  } else if (path == "/login") {
+    // A form with a username and a password; submitting it (with the fields
+    // set by the test) never leaves the page.
+    body = "<!doctype html><title>login</title><body><form id=f onsubmit=\"return false\">"
+           "<input id=u type=text name=user><input id=p type=password name=pass>"
+           "<button type=submit>Sign in</button></form></body>";
+  } else if (path == "/text") {
+    // /text?t=<title>&body=<text>: a page of plain text (find in page).
+    body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) + "</title><body><p>" +
+           EscapeHtml(QueryParam(target, "body")) + "</p></body>";
+  } else if (path == "/playmp4") {
+    // Records a second of canvas video as H.264 (the engine's own encoder),
+    // then plays it back: proves the H.264 decoder, not just canPlayType.
+    body = R"html(<!doctype html><title>mp4 test</title><script>
+(() => {
+    try {
+      const types = ['video/webm;codecs=h264', 'video/mp4;codecs=avc1.42E01E', 'video/mp4;codecs=avc1'];
+      const mime = types.find((t) => MediaRecorder.isTypeSupported(t));
+      if (!mime) { document.title = 'MP4:FAIL:no H.264 recorder'; return; }
+      const c = document.createElement('canvas'); c.width = 160; c.height = 120;
+      const g = c.getContext('2d');
+      let n = 0;
+      const tick = setInterval(() => { g.fillStyle = 'hsl(' + (n++ * 9) + ',70%,50%)'; g.fillRect(0, 0, 160, 120); }, 33);
+      const rec = new MediaRecorder(c.captureStream(30), {mimeType: mime});
+      const chunks = [];
+      rec.ondataavailable = (e) => chunks.push(e.data);
+      rec.onstop = () => {
+        clearInterval(tick);
+        const v = document.createElement('video');
+        v.muted = true;
+        v.src = URL.createObjectURL(new Blob(chunks, {type: mime.split(';')[0]}));
+        const size = chunks.reduce((a, b) => a + b.size, 0);
+        v.onerror = () => { document.title = 'MP4:FAIL:decode error ' + mime + ' bytes=' + size; };
+        v.play().then(() => {
+          const t0 = Date.now();
+          const poll = setInterval(() => {
+            if (v.currentTime > 0.1) { clearInterval(poll); document.title = 'MP4:OK:' + mime; }
+            else if (Date.now() - t0 > 8000) { clearInterval(poll); document.title = 'MP4:FAIL:time stuck'; }
+          }, 100);
+        }, (e) => { document.title = 'MP4:FAIL:' + e + ' ' + mime + ' bytes=' + size; });
+      };
+      rec.start();
+      setTimeout(() => rec.stop(), 1200);
+    } catch (e) { document.title = 'MP4:FAIL:' + e; }
+})();
+</script>)html";
   } else if (path == "/links") {
     // A big link at the top-left; synthetic (untrusted) clicks are recorded
     // in the title and must never open a glance.

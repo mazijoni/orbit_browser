@@ -16,6 +16,37 @@ Workspace::Workspace(Profile* profile, WorkspaceRecord record)
 
 Workspace::~Workspace() = default;
 
+bool IsEssentialTab(const Tab* tab) {
+  return tab && tab->workspace() && tab->workspace()->is_essentials();
+}
+
+void Workspace::set_profile(Profile* profile) {
+  profile_ = profile;
+  record_.profile_id = profile->id();
+  if (essentials_) essentials_->set_profile(profile);
+}
+
+Workspace* Workspace::EnsureEssentials() {
+  if (essentials_) return essentials_.get();
+  WorkspaceRecord rec;
+  rec.profile_id = profile_->id();
+  rec.name = L"Essentials";
+  rec.kind = WorkspaceRecord::kKindEssentials;
+  rec.owner_id = record_.id;
+  if (!profile_->is_private()) {
+    auto stored = Application::Get()->store().CreateWorkspace(rec);
+    if (!stored) return nullptr;
+    rec = *stored;
+  }
+  AdoptEssentials(std::make_unique<Workspace>(profile_, rec));
+  return essentials_.get();
+}
+
+void Workspace::AdoptEssentials(std::unique_ptr<Workspace> grid) {
+  essentials_ = std::move(grid);
+  if (essentials_) essentials_->owner_ = this;
+}
+
 int Workspace::IndexOf(const Tab* tab) const {
   for (size_t i = 0; i < tabs_.size(); ++i) {
     if (tabs_[i].get() == tab) return static_cast<int>(i);
@@ -533,6 +564,11 @@ CefRefPtr<CefRequestContext> Profile::request_context() {
       ORBIT_LOG_ERROR("profile %lld: Chromium rejected its storage path; data will NOT persist",
                        record_.id);
     }
+    // Chrome style gives a page that paints no background (plain text, JSON,
+    // raw HTML) the dark browser theme's base colour: black text on dark.
+    // Chrome shows white, so the base stays light; what pages are told to
+    // prefer comes from Orbit's theme (Tab::ApplyWebColorScheme).
+    context_->SetChromeColorScheme(CEF_COLOR_VARIANT_LIGHT, 0);
     RegisterInternalSchemeHandler(context_, record_.id, is_private_);
     ORBIT_LOG_INFO("created request context for profile %lld (private=%d)", record_.id,
                     is_private_ ? 1 : 0);
@@ -541,26 +577,37 @@ CefRefPtr<CefRequestContext> Profile::request_context() {
 }
 
 Workspace* Profile::FindWorkspace(int64_t id) const {
-  for (const auto& w : workspaces_) {
-    if (w->id() == id) return w.get();
+  for (const auto* list : {&workspaces_, &linked_}) {
+    for (const auto& w : *list) {
+      if (w->id() == id) return w.get();
+    }
   }
   return nullptr;
 }
 
 Workspace* Profile::AddWorkspace(std::unique_ptr<Workspace> workspace) {
-  workspaces_.push_back(std::move(workspace));
-  return workspaces_.back().get();
+  auto& list = workspace->is_linked() ? linked_ : workspaces_;
+  list.push_back(std::move(workspace));
+  return list.back().get();
 }
 
 std::unique_ptr<Workspace> Profile::RemoveWorkspace(Workspace* workspace) {
-  for (auto it = workspaces_.begin(); it != workspaces_.end(); ++it) {
-    if (it->get() == workspace) {
-      std::unique_ptr<Workspace> out = std::move(*it);
-      workspaces_.erase(it);
-      return out;
+  for (auto* list : {&workspaces_, &linked_}) {
+    for (auto it = list->begin(); it != list->end(); ++it) {
+      if (it->get() == workspace) {
+        std::unique_ptr<Workspace> out = std::move(*it);
+        list->erase(it);
+        return out;
+      }
     }
   }
   return nullptr;
+}
+
+void Profile::SortWorkspaces() {
+  std::stable_sort(workspaces_.begin(), workspaces_.end(), [](const auto& a, const auto& b) {
+    return a->record().position < b->record().position;
+  });
 }
 
 void Profile::MoveWorkspace(Workspace* workspace, int new_index) {
@@ -577,35 +624,23 @@ void Profile::MoveWorkspace(Workspace* workspace, int new_index) {
   Application::Get()->store().SetWorkspaceOrder(ids);
 }
 
-Workspace* Profile::EnsureEssentials() {
-  if (essentials_) return essentials_.get();
-  WorkspaceRecord rec;
-  rec.name = L"Essentials";
-  rec.kind = WorkspaceRecord::kKindEssentials;
-  if (!is_private_) {
-    auto stored = Application::Get()->store().CreateWorkspace(
-        record_.id, rec.name, 0, L"", WorkspaceRecord::kKindEssentials);
-    if (!stored) return nullptr;
-    rec = *stored;
-  }
-  essentials_ = std::make_unique<Workspace>(this, rec);
-  return essentials_.get();
-}
-
-bool Profile::IsEssential(const Tab* tab) const {
-  return essentials_ && tab && essentials_->IndexOf(tab) >= 0;
-}
-
 std::vector<Workspace*> Profile::containers() const {
   std::vector<Workspace*> out;
-  for (const auto& ws : workspaces_) out.push_back(ws.get());
-  if (essentials_) out.push_back(essentials_.get());
+  for (const auto& ws : workspaces_) {
+    out.push_back(ws.get());
+    if (ws->essentials()) out.push_back(ws->essentials());
+  }
+  for (const auto& ws : linked_) {
+    out.push_back(ws.get());
+    if (ws->essentials()) out.push_back(ws->essentials());
+  }
   return out;
 }
 
 void Profile::LoadFromStore(Store& store) {
   workspaces_.clear();
-  essentials_.reset();
+  linked_.clear();
+  std::vector<std::unique_ptr<Workspace>> grids;
   for (auto& wr : store.LoadWorkspaces(record_.id)) {
     auto ws = std::make_unique<Workspace>(this, wr);
     for (auto& g : store.LoadTabGroups(wr.id)) ws->AppendLoadedGroup(std::move(g));
@@ -613,7 +648,12 @@ void Profile::LoadFromStore(Store& store) {
     // Stored order is authoritative, but enforce pinned-first.
     std::stable_sort(tabs.begin(), tabs.end(),
                      [](const TabRecord& a, const TabRecord& b) { return a.pinned > b.pinned; });
-    Workspace* raw = AddWorkspace(std::move(ws));
+    Workspace* raw = ws.get();
+    if (wr.kind == WorkspaceRecord::kKindEssentials) {
+      grids.push_back(std::move(ws));  // not a space: its owner adopts it below
+    } else {
+      AddWorkspace(std::move(ws));
+    }
     // zen.pinned-tab-manager.restore-pinned-tabs-to-pinned-url (default off).
     const bool restore_pinned =
         store.GetPref(Store::kGlobalScope, L"restore_pinned_to_pinned_url") == L"1";
@@ -643,10 +683,32 @@ void Profile::LoadFromStore(Store& store) {
         only->set_empty_placeholder(true);
       }
     }
-    if (wr.kind == WorkspaceRecord::kKindEssentials) {
-      // Not a space: move it out of the space list.
-      essentials_ = RemoveWorkspace(raw);
+  }
+  // A linked space whose parent is gone became an ordinary space (its
+  // parent_id was cleared by ON DELETE SET NULL).
+  for (size_t i = 0; i < linked_.size();) {
+    Workspace* ws = linked_[i].get();
+    Workspace* parent = FindWorkspace(ws->record().parent_id);
+    if (parent && !parent->is_linked()) {
+      ws->set_parent(parent);
+      ++i;
+      continue;
     }
+    std::unique_ptr<Workspace> owned = RemoveWorkspace(ws);
+    owned->mutable_record().kind = WorkspaceRecord::kKindSpace;
+    owned->mutable_record().parent_id = 0;
+    owned->mutable_record().position = 1 << 30;  // last; Application renumbers the order
+    store.UpdateWorkspace(owned->record());
+    workspaces_.push_back(std::move(owned));
+  }
+  // Each Essentials grid goes to its space; a grid without one is dropped.
+  for (auto& grid : grids) {
+    Workspace* owner = FindWorkspace(grid->record().owner_id);
+    if (!owner || owner->essentials()) {
+      store.DeleteWorkspace(grid->id());
+      continue;
+    }
+    owner->AdoptEssentials(std::move(grid));
   }
 }
 

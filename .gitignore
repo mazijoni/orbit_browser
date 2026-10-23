@@ -9,6 +9,7 @@ CMakeUserPresets.json
 /third_party/cef/
 /third_party/sqlite/
 /third_party/downloads/
+/third_party/cef152_backup/
 
 # IDEs and editors
 .vs/

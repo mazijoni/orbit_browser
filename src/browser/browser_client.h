@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <unordered_set>
 
 #include "include/cef_client.h"
 #include "include/cef_context_menu_handler.h"
@@ -24,7 +25,8 @@ class BrowserClient : public CefClient,
                       public CefDownloadHandler,
                       public CefPermissionHandler,
                       public CefJSDialogHandler,
-                      public CefContextMenuHandler {
+                      public CefContextMenuHandler,
+                      public CefFindHandler {
  public:
   BrowserClient() = default;
 
@@ -36,6 +38,10 @@ class BrowserClient : public CefClient,
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+  CefRefPtr<CefFindHandler> GetFindHandler() override { return this; }
+  // CefFindHandler: results go to the find bar.
+  void OnFindResult(CefRefPtr<CefBrowser> browser, int identifier, int count, const CefRect& selection_rect,
+                    int active_match_ordinal, bool final_update) override;
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefFocusHandler> GetFocusHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
@@ -132,6 +138,10 @@ class BrowserClient : public CefClient,
   void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                            CefRefPtr<CefContextMenuParams> params,
                            CefRefPtr<CefMenuModel> model) override;
+  // Orbit draws the page menu itself (ui::TrackMenu), in the chrome's style.
+  bool RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefContextMenuParams> params, CefRefPtr<CefMenuModel> model,
+                      CefRefPtr<CefRunContextMenuCallback> callback) override;
   bool OnContextMenuCommand(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                             CefRefPtr<CefContextMenuParams> params, int command_id,
                             EventFlags event_flags) override;
@@ -143,6 +153,10 @@ class BrowserClient : public CefClient,
  private:
   std::unordered_map<int, Tab*> tabs_;           // browser id -> tab
   std::unordered_map<int, Tab*> pending_popups_;  // popup id -> tab
+  // Native popup windows (window.open with sizes: OAuth / sign-in). These are
+  // real OS windows owned by their opener, not sidebar tabs, so window.close()
+  // works and focus returns to the opener. Tracked by browser id.
+  std::unordered_set<int> native_popups_;
 
   IMPLEMENT_REFCOUNTING(BrowserClient);
 };

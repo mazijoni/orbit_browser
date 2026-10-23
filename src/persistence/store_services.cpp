@@ -194,6 +194,75 @@ std::optional<BookmarkRecord> Store::FindBookmarkByUrl(int64_t profile_id,
 }
 
 // ---------------------------------------------------------------------------
+// Passwords (the secret is an opaque base64 blob; the store never decrypts it)
+
+namespace {
+PasswordRecord ReadPassword(const Database::Statement& s) {
+  PasswordRecord p;
+  p.id = s.ColumnInt64(0);
+  p.profile_id = s.ColumnInt64(1);
+  p.origin = s.ColumnText(2);
+  p.username = s.ColumnText(3);
+  p.secret = s.ColumnText(4);
+  p.created_at = s.ColumnInt64(5);
+  p.used_at = s.ColumnInt64(6);
+  return p;
+}
+}  // namespace
+
+std::vector<PasswordRecord> Store::LoadPasswords(int64_t profile_id) {
+  std::vector<PasswordRecord> out;
+  auto s = db_.Prepare(
+      "SELECT id, profile_id, origin, username, secret, created_at, used_at FROM passwords "
+      "WHERE profile_id = ? ORDER BY origin, username");
+  s.Bind(1, profile_id);
+  while (s.Step()) out.push_back(ReadPassword(s));
+  return out;
+}
+
+std::vector<PasswordRecord> Store::FindPasswords(int64_t profile_id, const std::wstring& origin) {
+  std::vector<PasswordRecord> out;
+  auto s = db_.Prepare(
+      "SELECT id, profile_id, origin, username, secret, created_at, used_at FROM passwords "
+      "WHERE profile_id = ? AND origin = ? ORDER BY used_at DESC, username");
+  s.Bind(1, profile_id).Bind(2, origin);
+  while (s.Step()) out.push_back(ReadPassword(s));
+  return out;
+}
+
+int64_t Store::UpsertPassword(const PasswordRecord& p) {
+  auto s = db_.Prepare(
+      "INSERT INTO passwords (profile_id, origin, username, secret, created_at, used_at) "
+      "VALUES (?1, ?2, ?3, ?4, ?5, ?6) "
+      "ON CONFLICT(profile_id, origin, username) DO UPDATE SET secret = ?4, used_at = "
+      "MAX(used_at, ?6)");
+  s.Bind(1, p.profile_id).Bind(2, p.origin).Bind(3, p.username).Bind(4, p.secret);
+  s.Bind(5, p.created_at ? p.created_at : NowUnixMillis()).Bind(6, p.used_at);
+  if (!s.Run()) return 0;
+  auto id = db_.Prepare("SELECT id FROM passwords WHERE profile_id = ? AND origin = ? AND username = ?");
+  id.Bind(1, p.profile_id).Bind(2, p.origin).Bind(3, p.username);
+  return id.Step() ? id.ColumnInt64(0) : 0;
+}
+
+bool Store::TouchPassword(int64_t profile_id, int64_t id, int64_t used_at) {
+  auto s = db_.Prepare("UPDATE passwords SET used_at = ? WHERE id = ? AND profile_id = ?");
+  s.Bind(1, used_at).Bind(2, id).Bind(3, profile_id);
+  return s.Run();
+}
+
+bool Store::DeletePassword(int64_t profile_id, int64_t id) {
+  auto s = db_.Prepare("DELETE FROM passwords WHERE id = ? AND profile_id = ?");
+  s.Bind(1, id).Bind(2, profile_id);
+  return s.Run();
+}
+
+int Store::PasswordCount(int64_t profile_id) {
+  auto s = db_.Prepare("SELECT COUNT(*) FROM passwords WHERE profile_id = ?");
+  s.Bind(1, profile_id);
+  return s.Step() ? s.ColumnInt(0) : 0;
+}
+
+// ---------------------------------------------------------------------------
 // Downloads
 
 int64_t Store::InsertDownload(const DownloadRecord& d) {

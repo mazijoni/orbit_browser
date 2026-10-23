@@ -14,10 +14,14 @@
 #include "app/application.h"
 #include "browser/browser_client.h"
 #include "browser/downloads.h"
+#include "browser/extension_bridge.h"
+#include "browser/find_bar.h"
 #include "browser/internal_page_parts.h"
 #include "browser/permissions.h"
 #include "browser/profile.h"
 #include "core/bookmark_html.h"
+#include "browser/importer.h"
+#include "browser/password_vault.h"
 #include "core/process_metrics.h"
 #include "core/shortcuts.h"
 #include "core/space_routing.h"
@@ -444,13 +448,15 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
     d->SetBool("newtabTop", pref_on(L"newtab_button_top", true));
     d->SetBool("ctrlTabSkipPending", pref_on(L"ctrl_tab_skip_pending", false));
     d->SetBool("greyOut", pref_on(L"grey_out_inactive", true));
+    d->SetBool("urlbarWide", pref_on(L"urlbar_wide", false));
     d->SetBool("dragFromContent", pref_on(L"drag_window_from_content", true));
     d->SetBool("quickActions", pref_on(L"quick_actions", true));
     d->SetBool("tabsRight", pref_on(L"tabs_right", false));
     d->SetBool("compactFlash", pref_on(L"compact_flash", false));  // zen.view.compact.toolbar-flash-popup
     d->SetBool("searchSuggestions", pref_on(L"search_suggestions", false));  // browser.search.suggest.enabled
     d->SetBool("ctrlTabWithin", pref_on(L"ctrl_tab_ignore_essentials", false));  // zen.tabs.ctrl-tab.ignore-essential-tabs
-    d->SetBool("continueLeftOff", pref_on(L"continue_where_left_off", false));  // zen.workspaces.continue-where-left-off
+    d->SetBool("continueLeftOff", pref_on(L"continue_where_left_off", false));
+    d->SetBool("autofillPasswords", pref_on(L"autofill_passwords", true));  // zen.workspaces.continue-where-left-off
     d->SetBool("glance", pref_on(L"glance_enabled", true));
     d->SetString("glanceTrigger", store.GetPref(Store::kGlobalScope, L"glance_trigger").value_or(L"alt"));
     d->SetString("urlbar", store.GetPref(Store::kGlobalScope, L"urlbar_behavior").value_or(L"floating-on-type"));
@@ -471,12 +477,15 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
       e->SetDouble("space", static_cast<double>(r.space_id));
       routes->SetDictionary(i++, e);
     }
+    // Routes may name a space of any profile (the tab opens in its profile).
     CefRefPtr<CefListValue> spaces = CefListValue::Create();
     i = 0;
-    for (const auto& ws : profile->workspaces()) {
+    for (Workspace* ws : app->Spaces()) {
       Dict e = CefDictionaryValue::Create();
       e->SetDouble("id", static_cast<double>(ws->id()));
-      e->SetString("name", ws->record().name);
+      e->SetString("name", ws->profile() == app->profiles().front().get()
+                               ? ws->record().name
+                               : ws->record().name + L" (" + ws->profile()->record().name + L")");
       spaces->SetDictionary(i++, e);
     }
     Dict d = CefDictionaryValue::Create();
@@ -519,8 +528,104 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
     d->SetList("items", items);
     return Json(d);
   }
+  if (api == L"passwords") {
+    // The list never includes the secret; revealing one is a separate action.
+    CefRefPtr<CefListValue> items = CefListValue::Create();
+    size_t i = 0;
+    if (!profile->is_private()) {
+      for (const auto& p : store.LoadPasswords(profile->id())) {
+        Dict d = CefDictionaryValue::Create();
+        d->SetDouble("id", static_cast<double>(p.id));
+        d->SetString("origin", p.origin);
+        d->SetString("username", p.username);
+        items->SetDictionary(i++, d);
+      }
+    }
+    Dict d = CefDictionaryValue::Create();
+    d->SetList("items", items);
+    d->SetBool("private", profile->is_private());
+    return Json(d);
+  }
+  if (api == L"import-sources") {
+    CefRefPtr<CefListValue> items = CefListValue::Create();
+    size_t i = 0;
+    if (!profile->is_private()) {
+      for (const auto& s : importer::DetectSources()) {
+        Dict d = CefDictionaryValue::Create();
+        d->SetInt("index", static_cast<int>(i));
+        d->SetString("name", s.name);
+        d->SetBool("bookmarks", s.has_bookmarks);
+        d->SetBool("passwords", s.has_passwords);
+        d->SetBool("history", s.has_history);
+        items->SetDictionary(i++, d);
+      }
+    }
+    Dict d = CefDictionaryValue::Create();
+    d->SetList("items", items);
+    return Json(d);
+  }
   if (!req.trusted_action) return Error(403, "forbidden");
   Dict body = ParseBody(req);
+  if (api == L"password-reveal") {
+    if (profile->is_private()) return Error(403, "no passwords in private windows");
+    const int64_t id = Number(body, "id");
+    for (const auto& p : store.LoadPasswords(profile->id())) {
+      if (p.id != id) continue;
+      Dict d = CefDictionaryValue::Create();
+      d->SetString("password", passwords::Unprotect(p.secret));
+      return Json(d);
+    }
+    return Error(404, "no such login");
+  }
+  if (api == L"password-delete") {
+    if (profile->is_private()) return Error(403, "forbidden");
+    store.DeletePassword(profile->id(), Number(body, "id"));
+    return Ok();
+  }
+  if (api == L"import-run") {
+    if (profile->is_private()) return Error(403, "no import into private windows");
+    const int index = static_cast<int>(Number(body, "index"));
+    const bool want_bm = !body->HasKey("bookmarks") || body->GetBool("bookmarks");
+    const bool want_pw = !body->HasKey("passwords") || body->GetBool("passwords");
+    const bool want_hist = body->HasKey("history") && body->GetBool("history");
+    const auto sources = importer::DetectSources();
+    if (index < 0 || index >= static_cast<int>(sources.size())) return Error(400, "no such source");
+    const importer::Data data = importer::Read(sources[static_cast<size_t>(index)], want_bm, want_pw, want_hist);
+    int bookmarks = 0, logins = 0, history = 0;
+    {
+      Database::Transaction txn(store.db());
+      if (want_bm && !data.bookmarks.empty()) {
+        BookmarkRecord folder;
+        folder.profile_id = profile->id();
+        folder.is_folder = true;
+        folder.title = L"Imported — " + sources[static_cast<size_t>(index)].name;
+        const int64_t root = store.AddBookmark(folder);
+        AddBookmarkTree(store, profile->id(), root, data.bookmarks, bookmarks);
+      }
+      for (const auto& l : data.logins) {
+        const std::wstring secret = passwords::Protect(l.password);
+        if (secret.empty()) continue;
+        PasswordRecord p;
+        p.profile_id = profile->id();
+        p.origin = l.origin;
+        p.username = l.username;
+        p.secret = secret;
+        if (store.UpsertPassword(p)) ++logins;
+      }
+      for (const auto& h : data.history) {
+        if (h.visit_time <= 0) continue;
+        store.AddVisit(profile->id(), h.url, h.title, h.visit_time);
+        ++history;
+      }
+      txn.Commit();
+    }
+    if (bookmarks) NotifyBookmarksChanged(profile);
+    Dict d = CefDictionaryValue::Create();
+    d->SetInt("bookmarks", bookmarks);
+    d->SetInt("passwords", logins);
+    d->SetInt("history", history);
+    return Json(d);
+  }
   if (api == L"set") {
     const std::wstring key = Str(body, "key");
     const std::wstring value = Str(body, "value");
@@ -581,10 +686,10 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
       app->UpdateSleepPolicy();
     } else if (key == L"newtab_button" || key == L"newtab_button_top" ||
                key == L"ctrl_tab_skip_pending" || key == L"glance_enabled" ||
-               key == L"grey_out_inactive" || key == L"drag_window_from_content" ||
+               key == L"grey_out_inactive" || key == L"drag_window_from_content" || key == L"urlbar_wide" ||
                key == L"quick_actions" || key == L"tabs_right" || key == L"compact_flash" ||
                key == L"search_suggestions" || key == L"ctrl_tab_ignore_essentials" ||
-               key == L"continue_where_left_off") {
+               key == L"continue_where_left_off" || key == L"autofill_passwords") {
       store.SetPref(Store::kGlobalScope, key, value == L"1" ? L"1" : L"0");
       app->ApplyThemeToAllWindows();  // windows re-read their settings
     } else if (key == L"glance_trigger" || key == L"urlbar_behavior") {
@@ -616,14 +721,14 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
         r.match = Str(e, "match") == L"equal-to" ? SpaceRoute::Match::kEqualTo : SpaceRoute::Match::kContains;
         r.reference = Str(e, "reference").substr(0, 2000);
         r.space_id = Number(e, "space");
-        if (r.space_id && !profile->FindWorkspace(r.space_id)) continue;
+        if (r.space_id && (!app->FindSpace(r.space_id) || app->FindSpace(r.space_id)->is_linked())) continue;
         routes.push_back(std::move(r));
       }
     }
     store.SetPref(Store::kGlobalScope, L"space_routes", SerializeRoutes(routes));
     const int64_t external = Number(body, "external");
     store.SetPref(Store::kGlobalScope, L"space_route_external",
-                  external && profile->FindWorkspace(external) ? std::to_wstring(external) : L"0");
+                  external && app->FindSpace(external) ? std::to_wstring(external) : L"0");
     return Ok();
   }
   if (api == L"shortcut-record") {
@@ -1248,14 +1353,16 @@ InternalResponse LibraryApi(const InternalRequest& req, Profile* profile) {
   BrowserWindow* window = LibraryWindow(req.browser_id);
   if (!window) return Error(403, "not a library panel");
   if (api == L"spaces") {
+    // The spaces the window switches between (every normal profile's).
     CefRefPtr<CefListValue> spaces = CefListValue::Create();
     size_t i = 0;
-    for (const auto& ws : profile->workspaces()) {
+    for (Workspace* ws : window->Spaces()) {
+      if (ws->is_linked()) continue;  // a linked window's space is not a space of its own here
       Dict s = CefDictionaryValue::Create();
       s->SetDouble("id", static_cast<double>(ws->id()));
       s->SetString("name", ws->record().name);
       s->SetString("icon", ws->record().icon);
-      s->SetBool("current", ws.get() == window->workspace());
+      s->SetBool("current", ws == window->workspace());
       CefRefPtr<CefListValue> tabs = CefListValue::Create();
       size_t j = 0;
       for (size_t k = 0; k < ws->tabs().size(); ++k) {
@@ -1309,6 +1416,124 @@ InternalResponse LibraryApi(const InternalRequest& req, Profile* profile) {
   if (api == L"spaces/new") {
     if (profile->is_private()) return Error(403, "no spaces in private windows");
     PostToLibraryWindow(id, [](BrowserWindow* w) { w->LibraryNewSpace(); });
+    return Ok();
+  }
+  return Error(404, "unknown endpoint");
+}
+
+// orbit://extensions: Orbit's own management page over Chrome's extension
+// system (see ExtensionBridge). The list is the bridge's last report; the
+// actions are asynchronous, so the page polls /api/list.
+InternalResponse ExtensionsApi(const InternalRequest& req, Profile* profile) {
+  Application* app = Application::Get();
+  const std::wstring api = ApiName(req);
+  ExtensionBridge* bridge = app->Extensions(profile);
+  if (api == L"list") {
+    Dict d = CefDictionaryValue::Create();
+    d->SetBool("available", bridge != nullptr);
+    if (!bridge) return Json(d);
+    d->SetBool("ready", bridge->ready());
+    d->SetBool("developer", bridge->developer_mode());
+    d->SetDouble("revision", static_cast<double>(bridge->revision()));
+    d->SetString("error", bridge->last_error());
+    CefRefPtr<CefListValue> items = CefListValue::Create();
+    size_t i = 0;
+    for (const ExtensionInfo& e : bridge->extensions()) {
+      Dict x = CefDictionaryValue::Create();
+      x->SetString("id", e.id);
+      x->SetString("name", e.name);
+      x->SetString("version", e.version);
+      x->SetString("description", e.description);
+      x->SetString("icon", e.icon);
+      x->SetString("location", e.location);
+      x->SetString("options", e.options_url);
+      x->SetString("home", e.home_url);
+      x->SetBool("enabled", e.enabled);
+      x->SetBool("mayDisable", e.may_disable);
+      x->SetBool("popup", !e.popup.empty());
+      CefRefPtr<CefListValue> perms = CefListValue::Create();
+      for (size_t k = 0; k < e.permissions.size(); ++k) perms->SetString(k, e.permissions[k]);
+      x->SetList("permissions", perms);
+      items->SetDictionary(i++, x);
+    }
+    d->SetList("extensions", items);
+    return Json(d);
+  }
+  if (!req.trusted_action) return Error(403, "forbidden");
+  if (!bridge) return Error(403, "no extensions in private windows");
+  Dict body = ParseBody(req);
+  const std::string id = ToUtf8(Str(body, "id"));
+  BrowserWindow* window = WindowFor(profile);
+  if (api == L"refresh") {
+    bridge->Refresh();
+    return Ok();
+  }
+  if (api == L"enable") {
+    if (!ExtensionBridge::IsExtensionId(id)) return Error(400, "bad id");
+    bridge->SetEnabled(id, body->HasKey("enabled") && body->GetBool("enabled"));
+    return Ok();
+  }
+  if (api == L"remove") {
+    if (!ExtensionBridge::IsExtensionId(id)) return Error(400, "bad id");
+    bridge->Uninstall(id);  // Chrome asks for confirmation itself
+    return Ok();
+  }
+  if (api == L"developer-mode") {
+    bridge->SetDeveloperMode(body->HasKey("enabled") && body->GetBool("enabled"));
+    return Ok();
+  }
+  if (api == L"load-unpacked") {
+    bridge->LoadUnpacked();
+    return Ok();
+  }
+  if (api == L"open-options") {
+    if (!ExtensionBridge::IsExtensionId(id) || !window) return Error(400, "bad request");
+    for (const ExtensionInfo& e : bridge->extensions()) {
+      // Only the extension's own page, as reported by Chrome.
+      if (e.id == id && e.options_url.rfind("chrome-extension://" + id + "/", 0) == 0) {
+        window->OpenTab(FromUtf8(e.options_url), true);
+        return Ok();
+      }
+    }
+    return Error(404, "no options page");
+  }
+  if (api == L"open-store") {
+    if (!window) return Error(400, "no window");
+    window->OpenTab(L"https://chromewebstore.google.com/category/extensions", true);
+    return Ok();
+  }
+  if (api == L"open") {
+    const std::wstring url = Str(body, "url");
+    if (!window || url.rfind(L"https://", 0) != 0) return Error(400, "only https pages open from here");
+    window->OpenTab(url, true);
+    return Ok();
+  }
+  return Error(404, "unknown endpoint");
+}
+
+// orbit://find/: the find bar's page. It acts on the active tab of the window
+// the bar belongs to.
+InternalResponse FindApi(const InternalRequest& req, Profile*) {
+  const std::wstring api = ApiName(req);
+  if (api == L"state") {
+    const FindBar::State st = FindBar::CurrentState();
+    Dict d = CefDictionaryValue::Create();
+    d->SetBool("open", st.open);
+    d->SetInt("count", st.count);
+    d->SetInt("active", st.active);
+    d->SetString("text", FindBar::LastText());
+    return Json(d);
+  }
+  if (!req.trusted_action) return Error(403, "forbidden");
+  Dict body = ParseBody(req);
+  if (api == L"search") {
+    FindBar::Search(Str(body, "text"), !body->HasKey("forward") || body->GetBool("forward"),
+                    body->HasKey("matchCase") && body->GetBool("matchCase"),
+                    body->HasKey("next") && body->GetBool("next"));
+    return Ok();
+  }
+  if (api == L"close") {
+    FindBar::Close();
     return Ok();
   }
   return Error(404, "unknown endpoint");

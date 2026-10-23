@@ -1,7 +1,12 @@
 # Plan: profiles per space, linked window spaces, per-space Essentials
 
-Written 2026-10-22, at the end of session 5, for a later session. Nothing in
-this file is implemented yet.
+Written 2026-10-22, at the end of session 5, for a later session.
+
+**Status (2026-10-22, session 6): implemented** with the defaults of the open
+questions below (tabs come back in a folder; one window shows every profile's
+spaces; the shared Essentials were copied into every space). See
+IMPLEMENTATION_LOG.md, "Session 6". Still open: the drag-out check with a real
+mouse.
 
 ## How to resume
 

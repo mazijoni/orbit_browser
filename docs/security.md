@@ -22,12 +22,13 @@
 | Certificates | No `OnCertificateError` override: Chromium's default cancels the request and shows an error page. There is no "proceed anyway". Mixed or broken HTTPS shows a warning indicator | `security` self-test (needs internet: `expired.badssl.com`) |
 | JS dialogs | `alert`/`confirm`/`prompt` from background tabs are suppressed, so a hidden tab cannot pop dialogs over the active page | Code review |
 | Local data | Orbit stores no credentials. The SQLite metadata DB holds history, bookmarks, tab URLs and preferences, unencrypted, in the user's profile directory (same trust level as Chromium's own history DB) | — |
+| Extensions | Chrome's own extension system (MV3, permissions shown by Chrome before install, per-profile storage). Orbit adds: extension pages (`chrome-extension://`) cannot reach `orbit://` APIs (no gate header possible cross-origin, frame check kept); the bridge page is locked to `chrome://extensions` and its console channel is read only from that browser; action popups load only `chrome-extension://<id>/<manifest popup path>` after a path check (no scheme, `..`, backslash); private windows run no extensions; the Web Store brand override applies only to the store's own pages | `extensions` self-test: an extension page and a web page both fail to call `orbit://history/api/list`; a private window's page gets no content script; ids and popup paths are validated |
 | Logging | Orbit's log never contains URLs, titles or form data above verbose level | Code review (`core/log.h` rule) |
 
 ## Limitations inherited from CEF (Alloy style) / this version
 
 * **No Safe Browsing.** Google Safe Browsing is not available to CEF applications. Malicious-site and download-reputation warnings come only from Windows SmartScreen when files are opened.
-* **No password manager or autofill UI**, and no Chrome extensions (see architecture.md §9).
+* **No password manager UI beyond Orbit's own** (saved logins in Settings, autofill; no save-on-sign-in prompt yet), no address or card autofill. Chrome extensions are supported (architecture.md §3) with the limits listed there.
 * **Web Audio** playback is not detected by the sleep policy's media check. A tab playing only through Web Audio can be put to sleep. The policy is off by default.
 * **Clearing site data:** cookies and Orbit's own history can be cleared per profile. Cache and other site storage have no CEF API, so they are cleared by deleting the profile.
 * **Updates:** Chromium security fixes arrive only through new CEF releases. See the update strategy in architecture.md §12. The CEF pin must be bumped regularly.
@@ -41,5 +42,6 @@
 - [ ] Every new `orbit://` endpoint either is read-only or checks `req.trusted_action`, and none returns another profile's data
 - [ ] Every new renderer→browser message validates its argument types and count
 - [ ] New external inputs (files, URLs, IPC) have a unit test for malformed input
+- [ ] The CEF archive comes from a third-party build (psmux/godwinmix-cef, pinned by SHA-256); re-verify the pin and the source on every upgrade, or build your own
 - [ ] CEF version is the latest stable (`cef-builds.spotifycdn.com/index.json`); release notes checked for security fixes
 - [ ] Release binaries are code-signed; `bootstrap.exe` resources were modified *before* signing

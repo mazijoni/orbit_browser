@@ -101,6 +101,10 @@ const std::vector<ShortcutAction>& ShortcutActions() {
       {L"history", L"Pages", L"History", Ctrl('H')},
       {L"downloads", L"Pages", L"Downloads", Ctrl('J')},
       {L"bookmarks", L"Pages", L"Bookmarks", CtrlShift('O')},
+      {L"find", L"Pages", L"Find in page", Ctrl('F')},
+      {L"find-next", L"Pages", L"Find next", {VK_F3, false, false, false}},
+      {L"find-previous", L"Pages", L"Find previous", {VK_F3, false, true, false}},
+      {L"extensions", L"Pages", L"Extensions", CtrlShift('A')},
       // Unbound by default (ZenKeyboardShortcuts on Windows).
       {L"duplicate-tab", L"Tabs", L"Duplicate tab", {}},
       {L"reset-pinned-tab", L"Tabs", L"Reset pinned tab", {}},

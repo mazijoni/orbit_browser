@@ -406,6 +406,14 @@ void BrowserWindow::PaintUrlBar(ID2D1RenderTarget* rt) {
     DrawGlyph(rt, g.icons_small(), bookmarked_ ? glyph::kStarFilled : glyph::kStar, star_,
               brush_.Get());
   }
+  if (ext_btn_.right > ext_btn_.left) {
+    if (hover_.kind == HitKind::kExtensions) {
+      brush_->SetColor(palette_.hover);
+      rt->FillRoundedRectangle(D2D1::RoundedRect(ext_btn_, 6.f, 6.f), brush_.Get());
+    }
+    brush_->SetColor(palette_.text_secondary);
+    DrawGlyph(rt, g.icons_small(), glyph::kExtensions, ext_btn_, brush_.Get());
+  }
   if (CanCopyUrlFromButton()) {
     if (hover_.kind == HitKind::kCopyUrl) {
       brush_->SetColor(palette_.hover);
@@ -448,8 +456,8 @@ void BrowserWindow::PaintSidebar(ID2D1RenderTarget* rt) {
   if (!multi_toolbar()) PaintToolbar(rt);
   PaintEssentials(rt);
 
-  // The space's own part, sliding during a space switch (the Essentials
-  // grid above it is shared, so it stays, as in Zen when both spaces use it).
+  // The space's own part, sliding during a space switch (the Essentials grid
+  // above it is the new space's at once).
   const uint64_t now = ::GetTickCount64();
   if (space_snapshot_ && space_slide_.Running(now)) {
     const D2D1_RECT_F area = SpaceArea();
@@ -550,6 +558,18 @@ void BrowserWindow::PaintSpaceArea(ID2D1RenderTarget* rt) {
       // With pinned tabs, a chevron takes the icon's place on hover and while
       // the pinned section is folded (rotate(90deg) open, 0deg folded).
       float name_left = ws_indicator_.left + 10.f;
+      const bool linked = workspace_->is_linked() && workspace_->parent() &&
+                          linked_back_.right > linked_back_.left;
+      if (linked) {
+        // A linked window: a back arrow, then "Linked to <parent>".
+        if (hover_.kind == HitKind::kLinkedBack) {
+          brush_->SetColor(palette_.hover);
+          rt->FillRoundedRectangle(D2D1::RoundedRect(linked_back_, 6.f, 6.f), brush_.Get());
+        }
+        brush_->SetColor(palette_.text);
+        DrawGlyph(rt, g.icons_small(), glyph::kBack, Inset(linked_back_, 5.f, 4.f), brush_.Get());
+        name_left = linked_back_.right + 6.f;
+      }
       const bool has_pins = workspace_->PinnedCount() > 0;
       const bool folded = PinnedSectionCollapsed();
       if (has_pins && (hovered || folded)) {
@@ -565,7 +585,12 @@ void BrowserWindow::PaintSpaceArea(ID2D1RenderTarget* rt) {
         name_left += 24.f;
       }
       brush_->SetColor(palette_.text);
-      if (!rename_workspace_) {
+      if (!rename_workspace_ && linked) {
+        DrawTextIn(rt, g.text_bold(), L"Linked to " + workspace_->parent()->record().name,
+                   {name_left, ws_indicator_.top,
+                    (hovered ? ws_actions_.left : ws_indicator_.right) - 6.f, ws_indicator_.bottom},
+                   brush_.Get());
+      } else if (!rename_workspace_) {
         DrawTextIn(rt, g.text_bold(), workspace_->record().name,
                    {name_left, ws_indicator_.top,
                     (hovered ? ws_actions_.left : ws_indicator_.right) - 6.f, ws_indicator_.bottom},
@@ -617,6 +642,8 @@ void BrowserWindow::PaintSpaceArea(ID2D1RenderTarget* rt) {
       }
       if (row.is_group) {
         PaintGroupRow(rt, row, rect, focused);
+      } else if (row.linked) {
+        PaintLinkedRow(rt, row, rect, focused);
       } else if (row.split) {
         PaintSplitRow(rt, row, rect, focused);
       } else {
@@ -659,6 +686,7 @@ void BrowserWindow::PaintSpaceArea(ID2D1RenderTarget* rt) {
     for (const RowGhost& ghost : row_ghosts_) {
       if (!tween) break;
       Row row = ghost.row;
+      if (row.linked) continue;  // linked rows come and go with their windows
       if (!row.is_group) {
         row.tab = workspace_->IndexOf(reinterpret_cast<Tab*>(ghost.key.second));
         if (row.tab < 0) continue;  // closed meanwhile
@@ -773,7 +801,7 @@ void BrowserWindow::PaintEssentials(ID2D1RenderTarget* rt) {
   // --zen-toolbar-element-bg; the selected one shows its favicon blurred
   // behind an inner fill (zen.theme.essentials-favicon-bg).
   using namespace ui;
-  const Workspace* ess = profile_->essentials();
+  const Workspace* ess = essentials();
   if (!ess) return;
   const auto rects = EssentialRects();
   constexpr float kRadius = 10.f;
@@ -911,12 +939,14 @@ void BrowserWindow::PaintFooter(ID2D1RenderTarget* rt) {
   }
 
   // Workspace switcher: one dot per space (Zen's icon-less workspaces).
-  const auto& workspaces = profile_->workspaces();
+  const std::vector<Workspace*> workspaces = Spaces();
+  const auto& profiles = Application::Get()->profiles();
+  const Profile* default_profile = profiles.empty() ? nullptr : profiles.front().get();
   for (size_t i = 0; i < workspace_dots_.size(); ++i) {
     const size_t w = static_cast<size_t>(first_dot_workspace_) + i;
     if (w >= workspaces.size()) break;
     const D2D1_RECT_F r = workspace_dots_[i];
-    const bool active = workspaces[w].get() == workspace_;
+    const bool active = workspaces[w] == workspace_;
     const bool hovered = hover_.kind == HitKind::kWorkspace &&
                          hover_.index == static_cast<int>(w);
     const uint64_t now = ::GetTickCount64();
@@ -930,13 +960,25 @@ void BrowserWindow::PaintFooter(ID2D1RenderTarget* rt) {
     }
     const D2D1_POINT_2F c{(r.left + r.right) / 2.f, (r.top + r.bottom) / 2.f};
     const std::wstring& icon = workspaces[w]->record().icon;
-    if (!icon.empty()) {
+    if (workspaces[w]->is_linked()) {
+      brush_->SetColor(Alpha(palette_.text, active ? 0.85f : hovered ? 0.6f : 0.4f));
+      DrawGlyph(rt, Graphics::Get().icons_small(), glyph::kOpenInNew, Inset(r, 8.f, 8.f), brush_.Get());
+    } else if (!icon.empty()) {
       // .zen-workspace-icon: 12px; inactive buttons are dimmed (opacity 0.7).
       DrawWorkspaceIcon(rt, icon, r, 12.f, active || hovered ? 1.f : 0.6f);
-      continue;
+    } else {
+      brush_->SetColor(Alpha(palette_.text, active ? 0.85f : hovered ? 0.5f : 0.3f));
+      rt->FillEllipse(D2D1::Ellipse(c, 4.f, 4.f), brush_.Get());
     }
-    brush_->SetColor(Alpha(palette_.text, active ? 0.85f : hovered ? 0.5f : 0.3f));
-    rt->FillEllipse(D2D1::Ellipse(c, 4.f, 4.f), brush_.Get());
+    // A space of another profile carries that profile's colour, as Zen marks
+    // a container space with the container's colour.
+    if (const Profile* p = workspaces[w]->profile(); default_profile && p != default_profile && !p->is_private()) {
+      const D2D1_POINT_2F dot{r.right - 6.f, r.bottom - 6.f};
+      brush_->SetColor(BackdropAt(dot.x, dot.y));
+      rt->FillEllipse(D2D1::Ellipse(dot, 3.5f, 3.5f), brush_.Get());
+      brush_->SetColor(ColorFromRgb(p->record().color));
+      rt->FillEllipse(D2D1::Ellipse(dot, 2.5f, 2.5f), brush_.Get());
+    }
   }
 
   PaintIconButton(rt, create_new_, glyph::kAdd, {HitKind::kCreateNew, 0}, true);
@@ -1002,6 +1044,43 @@ void BrowserWindow::PaintGroupRow(ID2D1RenderTarget* rt, const Row& row,
     DrawTextIn(rt, g.text_small(), std::to_wstring(workspace_->GroupSize(group->id)),
                {rect.right - 30.f, rect.top, rect.right - 6.f, rect.bottom}, brush_.Get());
   }
+}
+
+void BrowserWindow::PaintLinkedRow(ID2D1RenderTarget* rt, const Row& row,
+                                   const D2D1_RECT_F& rect, bool focused) {
+  // The parent's view of a linked window: an always-collapsed "temp folder"
+  // with a window icon, the space's name and how many tabs it holds.
+  using namespace ui;
+  auto& g = Graphics::Get();
+  const auto children = LinkedChildren();
+  const int index = LinkedIndex(row.linked);
+  if (index < 0) return;
+  const Workspace* ls = children[static_cast<size_t>(index)];
+  const bool hovered = (hover_.kind == HitKind::kLinked && hover_.index == index) ||
+                       (dragging_tab_ && drop_linked_ == index);
+  if (hovered) {
+    brush_->SetColor(dragging_tab_ ? Alpha(palette_.accent, 0.25f) : palette_.hover);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, kRowRadius, kRowRadius), brush_.Get());
+  }
+  if (focused) {
+    brush_->SetColor(palette_.focus_ring);
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(Inset(rect, 0.75f, 0.75f), kRowRadius, kRowRadius),
+                             brush_.Get(), 1.5f);
+  }
+  const float cy = (rect.top + rect.bottom) / 2.f;
+  const float icon_x = collapsed_ ? (rect.left + rect.right) / 2.f - 8.f : rect.left + 10.f;
+  const D2D1_RECT_F icon{icon_x, cy - 8.f, icon_x + 16.f, cy + 8.f};
+  brush_->SetColor(Mix(ColorFromRgb(ls->record().color), palette_.text, 0.35f));
+  DrawGlyph(rt, g.icons(), glyph::kOpenInNew, icon, brush_.Get());
+  if (collapsed_) return;
+  int n = 0;
+  for (const auto& t : ls->tabs()) n += !t->empty_placeholder();
+  brush_->SetColor(palette_.text);
+  DrawTextIn(rt, g.text(), ls->record().name, {icon.right + 10.f, rect.top, rect.right - 34.f, rect.bottom},
+             brush_.Get());
+  brush_->SetColor(palette_.text_secondary);
+  DrawTextIn(rt, g.text_small(), std::to_wstring(n), {rect.right - 30.f, rect.top, rect.right - 6.f, rect.bottom},
+             brush_.Get());
 }
 
 void BrowserWindow::PaintSplitRow(ID2D1RenderTarget* rt, const Row& row,
@@ -1292,7 +1371,7 @@ void BrowserWindow::PaintPopup() {
       bool drew_favicon = false;
       if (row.kind == OmniboxRow::Kind::kSwitchTab) {
         Tab* t = reinterpret_cast<Tab*>(row.tab_key);
-        for (Workspace* ws : profile_->containers()) {
+        for (Workspace* ws : TabContainers()) {
           for (const auto& tt : ws->tabs()) {
             if (tt.get() != t || tt->favicon().bgra.empty()) continue;
             const FaviconPixels& px = tt->favicon();

@@ -155,6 +155,12 @@ function idb(mode, value) {
     document.title = 'DONE';
   } else if (op === 'read') {
     document.title = 'R:' + localStorage.getItem('k') + '|' + await idb('read');
+  } else if (op === 'codecs') {
+    const v = document.createElement('video');
+    const r = (t) => v.canPlayType(t) || 'no';
+    document.title = 'C:h264=' + r('video/mp4; codecs="avc1.42E01E"') + '|aac=' + r('audio/mp4; codecs="mp4a.40.2"') +
+      '|vp9=' + r('video/webm; codecs="vp9"') + '|av1=' + r('video/mp4; codecs="av01.0.05M.08"') +
+      '|hls=' + r('application/vnd.apple.mpegurl');
   } else if (op === 'popup') {
     window.open('orbit://selftest/?t=Opened');  // no user gesture: must be blocked
     setTimeout(() => { document.title = 'POPUP-TRIED'; }, 300);
@@ -194,6 +200,8 @@ InternalResponse BuildInternalResponse(const InternalRequest& req) {
     if (req.host == L"welcome") return WelcomeApi(req, profile);
     if (req.host == L"theme") return ThemeApi(req, profile);
     if (req.host == L"boost") return BoostApi(req, profile);
+    if (req.host == L"extensions") return ExtensionsApi(req, profile);
+    if (req.host == L"find") return FindApi(req, profile);
     return {404, "application/json", "{\"error\":\"not found\"}"};
   }
   if (req.host == L"newtab") return NewTabPage(req);
@@ -207,6 +215,8 @@ InternalResponse BuildInternalResponse(const InternalRequest& req) {
   if (req.host == L"welcome") return WelcomePage(req);
   if (req.host == L"theme") return ThemePage(req);
   if (req.host == L"boost") return BoostPage(req);
+  if (req.host == L"extensions") return ExtensionsPage(req);
+  if (req.host == L"find") return FindPage(req);
   if (req.host == L"selftest" && self_test::IsActive()) return SelfTestPage(req);
   return NotFound(req);
 }

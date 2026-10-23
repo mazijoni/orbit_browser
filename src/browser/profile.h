@@ -18,6 +18,13 @@ class Tab;
 // Organisational container for tabs. Not a security boundary: all workspaces
 // of a profile share that profile's request context. A workspace is shown in
 // at most one window at a time (window()).
+//
+// Three kinds share this class (WorkspaceRecord::kind):
+// - a space, listed in the space switcher;
+// - a space's Essentials grid (owned by the space, never shown as a space);
+// - a linked window space: a temporary space made by tearing a tab off into
+//   its own window. It stays linked to its parent space (same profile, so the
+//   same history, passwords and cookies) and shows the parent's Essentials.
 class Workspace {
  public:
   Workspace(Profile* profile, WorkspaceRecord record);
@@ -26,12 +33,29 @@ class Workspace {
   Workspace& operator=(const Workspace&) = delete;
 
   Profile* profile() const { return profile_; }
+  void set_profile(Profile* profile);  // also its Essentials grid
   int64_t id() const { return record_.id; }
   const WorkspaceRecord& record() const { return record_; }
   WorkspaceRecord& mutable_record() { return record_; }
+  bool is_essentials() const { return record_.kind == WorkspaceRecord::kKindEssentials; }
+  bool is_linked() const { return record_.kind == WorkspaceRecord::kKindLinked; }
 
   BrowserWindow* window() const { return window_; }
   void set_window(BrowserWindow* window) { window_ = window; }
+
+  // Zen Essentials with zen.workspaces.separate-essentials: each space has
+  // its own grid of up to BrowserWindow::kMaxEssentials tabs. Null until
+  // first used. owner() is the space a grid belongs to.
+  Workspace* essentials() const { return essentials_.get(); }
+  Workspace* EnsureEssentials();
+  void AdoptEssentials(std::unique_ptr<Workspace> grid);
+  Workspace* owner() const { return owner_; }
+  // A linked space: the space it was torn from (null otherwise).
+  Workspace* parent() const { return parent_; }
+  void set_parent(Workspace* parent) { parent_ = parent; }
+  // The space whose Essentials show with this one (a linked space shows its
+  // parent's grid).
+  Workspace* essentials_space() { return is_linked() && parent_ ? parent_ : this; }
 
   // Sidebar order. Pinned tabs always precede regular tabs.
   const std::vector<std::unique_ptr<Tab>>& tabs() const { return tabs_; }
@@ -113,6 +137,9 @@ class Workspace {
   Profile* profile_;
   WorkspaceRecord record_;
   BrowserWindow* window_ = nullptr;
+  std::unique_ptr<Workspace> essentials_;
+  Workspace* owner_ = nullptr;
+  Workspace* parent_ = nullptr;
   std::vector<std::unique_ptr<Tab>> tabs_;
   std::vector<TabGroupRecord> groups_;
   Tab* active_tab_ = nullptr;
@@ -142,18 +169,18 @@ class Profile {
   bool has_request_context() const { return context_ != nullptr; }
   void ReleaseRequestContext() { context_ = nullptr; }
 
+  // The spaces (in their global order) and, apart, the linked window spaces.
   const std::vector<std::unique_ptr<Workspace>>& workspaces() const { return workspaces_; }
-  Workspace* FindWorkspace(int64_t id) const;
-  Workspace* AddWorkspace(std::unique_ptr<Workspace> workspace);
+  const std::vector<std::unique_ptr<Workspace>>& linked_spaces() const { return linked_; }
+  Workspace* FindWorkspace(int64_t id) const;  // spaces and linked spaces
+  Workspace* AddWorkspace(std::unique_ptr<Workspace> workspace);  // by its kind
   std::unique_ptr<Workspace> RemoveWorkspace(Workspace* workspace);
   void MoveWorkspace(Workspace* workspace, int new_index);
+  // Keeps workspaces() in position order (after a reorder across profiles).
+  void SortWorkspaces();
 
-  // Zen Essentials: pinned tabs shared by every space of this profile, kept
-  // in a container that is never listed as a space. Null until first used.
-  Workspace* essentials() const { return essentials_.get(); }
-  Workspace* EnsureEssentials();
-  bool IsEssential(const Tab* tab) const;
-  // Every tab container: the spaces, then Essentials (if any).
+  // Every tab container: each space with its Essentials, then the linked
+  // spaces.
   std::vector<Workspace*> containers() const;
 
   // Loads workspaces and their tabs (as unloaded tabs) from the store.
@@ -168,7 +195,10 @@ class Profile {
   bool is_private_;
   CefRefPtr<CefRequestContext> context_;
   std::vector<std::unique_ptr<Workspace>> workspaces_;
-  std::unique_ptr<Workspace> essentials_;
+  std::vector<std::unique_ptr<Workspace>> linked_;
 };
+
+// True for a tab in some space's Essentials grid.
+bool IsEssentialTab(const Tab* tab);
 
 }  // namespace orbit

@@ -177,22 +177,85 @@ CREATE TABLE boosts (
 );
 )sql";
 
-constexpr const char* kMigrations[] = {kMigrationV1, kMigrationV2, kMigrationV3, kMigrationV4,
-                                       kMigrationV5, kMigrationV6, kMigrationV7, kMigrationV8,
-                                       kMigrationV9, kMigrationV10, kMigrationV11};
+// v12: spaces, profiles and windows (SPACES_PROFILES_WINDOWS_PLAN.md).
+// - Essentials belong to a space (zen.workspaces.separate-essentials): an
+//   Essentials row (kind 1) names its space in owner_id. The profile's shared
+//   grid is copied into every space of the profile, then dropped; a window
+//   that was on a shared Essential selects the copy in its space.
+// - Linked window spaces (kind 2) name the space they were torn from in
+//   parent_id; a window remembers the linked space it owns in linked_id.
+// - The spaces of every profile share one order (profiles in their order).
+constexpr const char* kMigrationV12 = R"sql(
+ALTER TABLE workspaces ADD COLUMN owner_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE;
+ALTER TABLE workspaces ADD COLUMN parent_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL;
+ALTER TABLE windows ADD COLUMN linked_id INTEGER NOT NULL DEFAULT 0;
+INSERT INTO workspaces (profile_id, name, color, icon, position, kind, owner_id)
+  SELECT s.profile_id, 'Essentials', 0, '', 0, 1, s.id FROM workspaces s
+  WHERE s.kind = 0 AND EXISTS (
+    SELECT 1 FROM workspaces e JOIN tabs t ON t.workspace_id = e.id
+    WHERE e.profile_id = s.profile_id AND e.kind = 1 AND e.owner_id IS NULL);
+INSERT INTO tabs (workspace_id, url, title, favicon_url, pinned, protected, group_id, position,
+                  last_active, pinned_url, custom_title, live_item, sublabel)
+  SELECT n.id, t.url, t.title, t.favicon_url, t.pinned, t.protected, NULL, t.position,
+         t.last_active, t.pinned_url, t.custom_title, '', ''
+  FROM workspaces n
+  JOIN workspaces s ON s.id = n.owner_id
+  JOIN workspaces e ON e.profile_id = s.profile_id AND e.kind = 1 AND e.owner_id IS NULL
+  JOIN tabs t ON t.workspace_id = e.id
+  WHERE n.kind = 1 AND n.owner_id IS NOT NULL
+  ORDER BY n.id, t.position, t.id;
+UPDATE windows SET active_tab_id = COALESCE((
+    SELECT c.id FROM tabs o
+    JOIN workspaces n ON n.owner_id = windows.workspace_id AND n.kind = 1
+    JOIN tabs c ON c.workspace_id = n.id AND c.position = o.position AND c.url = o.url
+    WHERE o.id = windows.active_tab_id LIMIT 1), active_tab_id)
+  WHERE active_tab_id IN (SELECT t.id FROM tabs t JOIN workspaces e ON e.id = t.workspace_id
+                          WHERE e.kind = 1 AND e.owner_id IS NULL);
+DELETE FROM workspaces WHERE kind = 1 AND owner_id IS NULL;
+UPDATE workspaces SET position = (
+    SELECT x.r FROM (SELECT w.id AS id,
+                            ROW_NUMBER() OVER (ORDER BY p.position, p.id, w.position, w.id) - 1 AS r
+                     FROM workspaces w JOIN profiles p ON p.id = w.profile_id
+                     WHERE w.kind = 0) x
+    WHERE x.id = workspaces.id)
+  WHERE kind = 0;
+)sql";
+
+// v13: saved logins, per profile. The password is stored with DPAPI (bound
+// to the Windows user, as Chromium does), so it never sits in the database in
+// the clear and is readable only by this user on this machine. One row per
+// (origin, username); `used_at` tracks the last fill for autofill ordering.
+constexpr const char* kMigrationV13 = R"sql(
+CREATE TABLE passwords (
+  id INTEGER PRIMARY KEY,
+  profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  origin TEXT NOT NULL,
+  username TEXT NOT NULL DEFAULT '',
+  secret TEXT NOT NULL,  -- base64 of the DPAPI-protected password
+  created_at INTEGER NOT NULL DEFAULT 0,
+  used_at INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(profile_id, origin, username)
+);
+CREATE INDEX passwords_profile ON passwords(profile_id, origin);
+)sql";
+
+constexpr const char* kMigrations[] = {kMigrationV1,  kMigrationV2,  kMigrationV3,  kMigrationV4,
+                                       kMigrationV5,  kMigrationV6,  kMigrationV7,  kMigrationV8,
+                                       kMigrationV9,  kMigrationV10, kMigrationV11, kMigrationV12,
+                                       kMigrationV13};
 static_assert(sizeof(kMigrations) / sizeof(kMigrations[0]) == kSchemaVersion);
 
 }  // namespace
 
-bool MigrateSchema(Database& db) {
+bool MigrateSchema(Database& db, int target) {
   const int current = db.UserVersion();
-  if (current < 0) return false;
+  if (current < 0 || target < 0 || target > kSchemaVersion) return false;
   if (current > kSchemaVersion) {
     ORBIT_LOG_ERROR("database schema v%d is newer than supported v%d", current,
                      kSchemaVersion);
     return false;
   }
-  for (int version = current; version < kSchemaVersion; ++version) {
+  for (int version = current; version < target; ++version) {
     Database::Transaction txn(db);
     if (!txn.active() || !db.Execute(kMigrations[version]) ||
         !db.SetUserVersion(version + 1) || !txn.Commit()) {

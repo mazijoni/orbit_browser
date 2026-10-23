@@ -13,6 +13,7 @@
 namespace orbit {
 
 class BrowserWindow;
+class DevToolsClient;
 class Profile;
 class Workspace;
 
@@ -100,6 +101,10 @@ class Tab {
   CefRefPtr<CefBrowser> browser() const { return browser_; }
   HWND host() const { return host_; }
   BrowserWindow* window() const { return window_; }
+  // The window showing this tab: the hosting window if it has one, else its
+  // space's window, else (for an Essential, whose grid has no window) the
+  // window of the space that owns the grid.
+  BrowserWindow* HostWindow() const;
 
   // Creates the Chromium browser (if needed) as a hidden child of |window|.
   void EnsureBrowser(BrowserWindow* window);
@@ -109,7 +114,22 @@ class Tab {
   void Reparent(BrowserWindow* window);
   // Places the host at |bounds_px| with rounded corners of |corner_px|.
   void Show(const RECT& bounds_px, int corner_px);
-  void Hide();
+  void Hide();  // the page and its DevTools
+
+  // DevTools docked beside the page, in a pane of the tab's window (F12,
+  // Ctrl+Shift+I, "Inspect" in the page menu). |inspect_at|: the element
+  // under that point (view coordinates) is selected.
+  void ShowDevTools(BrowserWindow* window, const CefPoint* inspect_at = nullptr);
+  void CloseDevTools();
+  bool devtools_open() const { return devtools_host_ != nullptr; }
+  bool devtools_alive() const { return devtools_browser_ != nullptr || devtools_creating_; }
+  CefRefPtr<CefBrowser> devtools_browser() const { return devtools_browser_; }
+  BrowserWindow* devtools_window() const { return devtools_window_; }
+  void ShowDevToolsPane(const RECT& bounds_px, int corner_px);
+  void HideDevToolsPane();
+  void OnDevToolsCreated(CefRefPtr<CefBrowser> browser);
+  void OnDevToolsClosing();  // DoClose: its host goes
+  void OnDevToolsClosed();
   void Focus();
 
   void Navigate(const std::wstring& url);
@@ -131,6 +151,10 @@ class Tab {
   // Frees the browser and renderer but keeps the tab (discard / window close).
   // |mark_discarded| shows the tab as discarded in the UI.
   void Unload(bool mark_discarded);
+  // The tab now belongs to another profile: a browser keeps the storage it
+  // was created with, so it closes; a tab on screen loads again at once (in
+  // the new profile's storage), the others when selected.
+  void UnloadForProfileChange();
 
   // Callbacks from BrowserClient.
   void OnAfterCreated(CefRefPtr<CefBrowser> browser);
@@ -176,6 +200,14 @@ class Tab {
   void ForgetMedia() { media_frames_.clear(); }
 
   static Tab* FromHost(HWND host);
+  // Hosts waiting for their Chrome-style widget to finish closing; a window
+  // must not be destroyed while any remain (its child widget would crash).
+  static int PendingHostDestroys();
+  // Destroys |host| (a parent window of a Chrome-style browser) once that
+  // browser's widget inside it has gone. Counted in PendingHostDestroys().
+  static void DestroyHostWhenGone(HWND host);
+  // Tells the page which colour scheme to prefer (Orbit's theme).
+  void ApplyWebColorScheme();
 
  private:
   void CreateHost(BrowserWindow* window);
@@ -188,6 +220,7 @@ class Tab {
   bool dirty_ = false;
 
   BrowserWindow* window_ = nullptr;
+  CefRefPtr<CefRegistration> color_scheme_session_;
   HWND host_ = nullptr;
   SIZE region_size_{};  // size the host's rounded window region was made for
   int region_corner_ = -1;
@@ -202,6 +235,13 @@ class Tab {
   bool empty_placeholder_ = false;
   FaviconPixels pinned_favicon_;
   bool recreate_after_close_ = false;
+  HWND devtools_host_ = nullptr;
+  BrowserWindow* devtools_window_ = nullptr;
+  CefRefPtr<CefBrowser> devtools_browser_;
+  CefRefPtr<DevToolsClient> devtools_client_;
+  bool devtools_creating_ = false;
+  SIZE devtools_region_size_{};
+  bool reload_if_shown_ = false;  // UnloadForProfileChange
 
   bool loading_ = false;
   double progress_ = 0.0;

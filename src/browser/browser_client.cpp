@@ -1,6 +1,7 @@
 #include "browser/browser_client.h"
 
 #include "browser/boost_apply.h"
+#include "browser/password_vault.h"
 
 #include <cmath>
 
@@ -11,6 +12,7 @@
 #include "app/application.h"
 #include "browser/downloads.h"
 #include "browser/external_protocol.h"
+#include "browser/find_bar.h"
 #include "browser/permissions.h"
 #include "browser/profile.h"
 #include "browser/tab.h"
@@ -18,16 +20,85 @@
 #include "include/wrapper/cef_closure_task.h"
 #include "include/base/cef_callback.h"
 #include "ui/browser_window.h"
+#include "ui/menu.h"
+#include "core/strings.h"
 
 namespace orbit {
 namespace {
 
 BrowserWindow* WindowFor(Tab* tab) {
-  return (tab && tab->workspace()) ? tab->workspace()->window() : nullptr;
+  return tab ? tab->HostWindow() : nullptr;
 }
 
 constexpr int kMenuSplitLink = MENU_ID_USER_FIRST + 1;
 constexpr int kMenuGlanceLink = MENU_ID_USER_FIRST + 2;
+constexpr int kMenuInspect = MENU_ID_USER_FIRST + 3;
+constexpr int kMenuNewTabLink = MENU_ID_USER_FIRST + 4;
+constexpr int kMenuCopyLink = MENU_ID_USER_FIRST + 5;
+constexpr int kMenuSearchSelection = MENU_ID_USER_FIRST + 6;
+constexpr int kMenuOpenImage = MENU_ID_USER_FIRST + 7;
+constexpr int kMenuCopyImageLink = MENU_ID_USER_FIRST + 8;
+
+bool CopyText(HWND owner, const std::wstring& text) {
+  bool open = false;
+  for (int attempt = 0; attempt < 20 && !(open = ::OpenClipboard(owner)); ++attempt) ::Sleep(10);
+  if (!open) return false;
+  bool ok = false;
+  ::EmptyClipboard();
+  const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+  if (HGLOBAL mem = ::GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+    if (void* dst = ::GlobalLock(mem)) {
+      memcpy(dst, text.c_str(), bytes);
+      ::GlobalUnlock(mem);
+      ok = ::SetClipboardData(CF_UNICODETEXT, mem) != nullptr;
+    }
+    if (!ok) ::GlobalFree(mem);
+  }
+  ::CloseClipboard();
+  return ok;
+}
+
+std::wstring AcceleratorText(int key, bool shift, bool ctrl, bool alt) {
+  std::wstring out;
+  if (ctrl) out += L"Ctrl+";
+  if (alt) out += L"Alt+";
+  if (shift) out += L"Shift+";
+  if ((key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9')) {
+    out += static_cast<wchar_t>(key);
+  } else if (key >= VK_F1 && key <= VK_F24) {
+    out += L"F" + std::to_wstring(key - VK_F1 + 1);
+  } else {
+    return L"";
+  }
+  return out;
+}
+
+// CEF's menu model as an HMENU for ui::TrackMenu (ids are CEF's).
+HMENU BuildMenu(CefRefPtr<CefMenuModel> model) {
+  HMENU menu = ::CreatePopupMenu();
+  for (size_t i = 0; i < model->GetCount(); ++i) {
+    const cef_menu_item_type_t type = model->GetTypeAt(i);
+    const UINT grayed = model->IsEnabledAt(i) ? 0 : MF_GRAYED;
+    std::wstring label = model->GetLabelAt(i).ToWString();
+    if (type == MENUITEMTYPE_SEPARATOR) {
+      ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    } else if (type == MENUITEMTYPE_SUBMENU) {
+      ::AppendMenuW(menu, MF_POPUP | grayed, reinterpret_cast<UINT_PTR>(BuildMenu(model->GetSubMenuAt(i))),
+                    label.c_str());
+    } else if (type == MENUITEMTYPE_COMMAND || type == MENUITEMTYPE_CHECK || type == MENUITEMTYPE_RADIO) {
+      int key = 0;
+      bool shift = false, ctrl = false, alt = false;
+      if (model->GetAcceleratorAt(i, key, shift, ctrl, alt)) {
+        const std::wstring accel = AcceleratorText(key, shift, ctrl, alt);
+        if (!accel.empty()) label += L"\t" + accel;
+      }
+      const UINT checked = model->IsCheckedAt(i) ? MF_CHECKED : 0;
+      ::AppendMenuW(menu, MF_STRING | grayed | checked, static_cast<UINT_PTR>(model->GetCommandIdAt(i)),
+                    label.c_str());
+    }
+  }
+  return menu;
+}
 
 bool IsWebLink(const std::wstring& url) {
   return url.rfind(L"https://", 0) == 0 || url.rfind(L"http://", 0) == 0;
@@ -38,27 +109,115 @@ bool IsWebLink(const std::wstring& url) {
 void BrowserClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>,
                                         CefRefPtr<CefContextMenuParams> params,
                                         CefRefPtr<CefMenuModel> model) {
-  // canOpenLinkInSplitView: web links of tabs in a space (not Essentials).
   Tab* tab = FindTab(browser->GetIdentifier());
-  if (!tab || !WindowFor(tab) || !(params->GetTypeFlags() & CM_TYPEFLAG_LINK)) return;
-  if (!IsWebLink(params->GetLinkUrl().ToWString())) return;
-  model->InsertItemAt(0, kMenuGlanceLink, "Open Link in Glance");
-  model->InsertItemAt(1, kMenuSplitLink, "Split Link to New Tab");
-  model->InsertSeparatorAt(2);
+  if (!tab || !WindowFor(tab)) return;
+  const int flags = params->GetTypeFlags();
+  size_t at = 0;
+  if ((flags & CM_TYPEFLAG_LINK) && IsWebLink(params->GetLinkUrl().ToWString())) {
+    // Firefox's link items, and canOpenLinkInSplitView / Glance (Zen).
+    model->InsertItemAt(at++, kMenuNewTabLink, "Open Link in New &Tab");
+    model->InsertItemAt(at++, kMenuGlanceLink, "Open Link in &Glance");
+    model->InsertItemAt(at++, kMenuSplitLink, "&Split Link to New Tab");
+    model->InsertItemAt(at++, kMenuCopyLink, "Copy &Link Address");
+    model->InsertSeparatorAt(at++);
+  }
+  if ((flags & CM_TYPEFLAG_MEDIA) && params->GetMediaType() == CM_MEDIATYPE_IMAGE &&
+      IsWebLink(params->GetSourceUrl().ToWString())) {
+    model->InsertItemAt(at++, kMenuOpenImage, "Open &Image in New Tab");
+    model->InsertItemAt(at++, kMenuCopyImageLink, "Copy Image Addr&ess");
+    model->InsertSeparatorAt(at++);
+  }
+  if (flags & CM_TYPEFLAG_SELECTION) {
+    std::wstring text = params->GetSelectionText().ToWString();
+    if (text.size() > 30) text = text.substr(0, 29) + L"\u2026";
+    for (wchar_t& c : text) {
+      if (c == L'\n' || c == L'\r' || c == L'\t') c = L' ';
+    }
+    if (!text.empty()) {
+      std::wstring label = L"Search for \u201C" + text + L"\u201D";
+      std::wstring escaped;
+      for (wchar_t c : label) {
+        if (c == L'&') escaped += L'&';
+        escaped += c;
+      }
+      model->AddSeparator();
+      model->AddItem(kMenuSearchSelection, escaped);
+    }
+  }
+  // Every page can be inspected (DevTools, docked).
+  model->AddSeparator();
+  model->AddItem(kMenuInspect, "I&nspect");
+}
+
+bool BrowserClient::RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>,
+                                   CefRefPtr<CefContextMenuParams>, CefRefPtr<CefMenuModel> model,
+                                   CefRefPtr<CefRunContextMenuCallback> callback) {
+  Tab* tab = FindTab(browser->GetIdentifier());
+  if (!WindowFor(tab) || model->GetCount() == 0) return false;
+  HMENU menu = BuildMenu(model);
+  POINT pt;
+  ::GetCursorPos(&pt);
+  // Shown after this callback returns (the menu runs its own loop).
+  CefPostTask(TID_UI, base::BindOnce(
+                          [](HMENU menu, POINT pt, int browser_id, CefRefPtr<CefRunContextMenuCallback> callback) {
+                            Application* app = Application::Get();
+                            Tab* t = app ? app->client()->FindTab(browser_id) : nullptr;
+                            BrowserWindow* w = WindowFor(t);
+                            const UINT cmd = w ? ui::TrackMenu(menu, 0, pt.x, pt.y, w->hwnd(), w->palette()) : 0;
+                            ::DestroyMenu(menu);
+                            if (cmd) {
+                              callback->Continue(static_cast<int>(cmd), EVENTFLAG_NONE);
+                            } else {
+                              callback->Cancel();
+                            }
+                          },
+                          menu, pt, browser->GetIdentifier(), callback));
+  return true;
 }
 
 bool BrowserClient::OnContextMenuCommand(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>,
                                          CefRefPtr<CefContextMenuParams> params, int command_id,
                                          EventFlags) {
-  if (command_id != kMenuSplitLink && command_id != kMenuGlanceLink) return false;
+  if (command_id < kMenuSplitLink || command_id > kMenuCopyImageLink) return false;
   Tab* tab = FindTab(browser->GetIdentifier());
-  const std::wstring url = params->GetLinkUrl().ToWString();
-  if (BrowserWindow* w = WindowFor(tab); w && IsWebLink(url)) {
-    if (command_id == kMenuGlanceLink) {
-      w->OpenGlance(tab, url);
-    } else {
-      w->SplitLinkInNewTab(tab, url);
+  BrowserWindow* w = WindowFor(tab);
+  if (!w) return true;
+  const std::wstring link = params->GetLinkUrl().ToWString();
+  const std::wstring image = params->GetSourceUrl().ToWString();
+  switch (command_id) {
+    case kMenuGlanceLink:
+      if (IsWebLink(link)) w->OpenGlance(tab, link);
+      break;
+    case kMenuSplitLink:
+      if (IsWebLink(link)) w->SplitLinkInNewTab(tab, link);
+      break;
+    case kMenuNewTabLink:
+      if (IsWebLink(link)) w->OpenRoutedTab(link, /*activate=*/false, /*external=*/false, tab);
+      break;
+    case kMenuCopyLink:
+      if (IsWebLink(link)) CopyText(w->hwnd(), link);
+      break;
+    case kMenuOpenImage:
+      if (IsWebLink(image)) w->OpenTabNear(tab, image, /*activate=*/false);
+      break;
+    case kMenuCopyImageLink:
+      if (IsWebLink(image)) CopyText(w->hwnd(), image);
+      break;
+    case kMenuSearchSelection: {
+      const std::wstring text = params->GetSelectionText().ToWString().substr(0, 500);
+      std::wstring url = Application::Get()->search_template();
+      const size_t q = url.find(L"{query}");
+      if (!text.empty() && q != std::wstring::npos) {
+        url.replace(q, 7, EscapeQueryComponent(text));
+        w->OpenTabNear(tab, url, true);
+      }
+      break;
     }
+    case kMenuInspect:
+      w->InspectElement(tab, params->GetXCoord(), params->GetYCoord());
+      break;
+    default:
+      break;
   }
   return true;
 }
@@ -104,10 +263,29 @@ bool BrowserClient::OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFr
     return true;
   }
 
-  // Every popup becomes a sidebar tab next to its opener. Letting Chromium
-  // create the browser (instead of cancelling and opening the URL ourselves)
-  // preserves window.opener, which sign-in flows rely on, and keeps the popup
-  // in the opener's request context (same profile).
+  // window.open(url, name, "width=...,height=...") — a real popup (OAuth /
+  // sign-in): a native window owned by the opener, so window.close() works
+  // and focus returns to the opener. Everything else becomes a sidebar tab.
+  if (target_disposition == CEF_WOD_NEW_POPUP) {
+    RECT owner{};
+    ::GetWindowRect(window->hwnd(), &owner);
+    const UINT dpi = ::GetDpiForWindow(window->hwnd());
+    const int w = popupFeatures.widthSet ? ::MulDiv(popupFeatures.width, dpi, 96) : 0;
+    const int h = popupFeatures.heightSet ? ::MulDiv(popupFeatures.height, dpi, 96) : 0;
+    CefRect rect;
+    rect.width = w > 100 ? w : (owner.right - owner.left) * 2 / 3;
+    rect.height = h > 100 ? h : (owner.bottom - owner.top) * 2 / 3;
+    rect.x = owner.left + ((owner.right - owner.left) - rect.width) / 2;
+    rect.y = owner.top + ((owner.bottom - owner.top) - rect.height) / 2;
+    windowInfo.SetAsPopup(window->hwnd(), target_frame_name);
+    windowInfo.bounds = rect;
+    windowInfo.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+    return false;  // allow; OnAfterCreated registers it as a native popup
+  }
+
+  // Letting Chromium create the browser (instead of cancelling and opening the
+  // URL ourselves) preserves window.opener, which sign-in flows rely on, and
+  // keeps the popup in the opener's request context (same profile).
   const bool activate = target_disposition != CEF_WOD_NEW_BACKGROUND_TAB;
   Tab* tab = window->CreatePopupTab(opener, target_url.ToWString(), activate, windowInfo);
   if (!tab) return true;
@@ -123,10 +301,22 @@ void BrowserClient::OnBeforePopupAborted(CefRefPtr<CefBrowser> browser, int popu
   Application::Get()->RemoveTab(tab, /*remember=*/false);
 }
 
+void BrowserClient::OnFindResult(CefRefPtr<CefBrowser> browser, int identifier, int count, const CefRect&,
+                                 int active_match_ordinal, bool) {
+  FindBar::OnResult(browser, identifier, count, active_match_ordinal);
+}
+
 void BrowserClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   HWND browser_hwnd = browser->GetHost()->GetWindowHandle();
   Tab* tab = Tab::FromHost(::GetParent(browser_hwnd));
   if (!tab) {
+    if (browser->IsPopup()) {
+      // A native popup window (OAuth / sign-in). It runs on its own; we only
+      // track it so shutdown can wait for it.
+      native_popups_.insert(browser->GetIdentifier());
+      ORBIT_LOG_INFO("native popup window created (browser %d)", browser->GetIdentifier());
+      return;
+    }
     // Not created by us (e.g. DevTools); close it to keep invariants simple.
     ORBIT_LOG_WARNING("unexpected browser created; closing");
     browser->GetHost()->CloseBrowser(true);
@@ -148,18 +338,27 @@ bool BrowserClient::DoClose(CefRefPtr<CefBrowser> browser) {
   ORBIT_LOG_VERBOSE("browser %d DoClose (known=%d)", browser->GetIdentifier(), tab ? 1 : 0);
   if (!tab) return false;
   if (tab->OnDoClose()) Application::Get()->DetachClosingTab(tab);
-  // We tore down the host window ourselves; never let CEF send WM_CLOSE to
-  // the top-level window (that would close every tab in it).
-  return true;
+  // Chrome style: CEF closes the browser's own widget inside the tab's host
+  // (it never touches our top-level window); the tab destroys the host later.
+  return false;
 }
 
 void BrowserClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
+  if (native_popups_.erase(browser->GetIdentifier())) {
+    Application::Get()->OnWindowBrowserClosed();  // in case a window close waits
+    return;
+  }
   auto it = tabs_.find(browser->GetIdentifier());
   ORBIT_LOG_VERBOSE("browser %d OnBeforeClose (known=%d)", browser->GetIdentifier(),
                      it != tabs_.end() ? 1 : 0);
   if (it == tabs_.end()) return;
   Tab* tab = it->second;
   tabs_.erase(it);
+  // Chrome style closes a child browser without calling DoClose; run what
+  // DoClose does (detach a tab that is being closed) here instead.
+  if (tab->load_state() != Tab::LoadState::kClosing && tab->OnDoClose()) {
+    Application::Get()->DetachClosingTab(tab);
+  }
   tab->OnBeforeClose();
   Application::Get()->OnBrowserClosed(tab);  // may delete |tab|
 }
@@ -235,6 +434,17 @@ bool BrowserClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
     }
     return true;
   }
+  if (message->GetName() == kPasswordSubmitMessage) {
+    Tab* tab = FindTab(browser->GetIdentifier());
+    CefRefPtr<CefListValue> args = message->GetArgumentList();
+    if (tab && frame && frame->IsMain() && args->GetSize() == 2 && args->GetType(0) == VTYPE_STRING &&
+        args->GetType(1) == VTYPE_STRING) {
+      // The origin is the sending frame's own (never the page's claim).
+      passwords::OfferToSave(tab, frame->GetURL().ToWString(), args->GetString(0).ToWString(),
+                             args->GetString(1).ToWString());
+    }
+    return true;
+  }
   if (message->GetName() == kMediaStateMessage) {
     Tab* tab = FindTab(browser->GetIdentifier());
     CefRefPtr<CefListValue> args = message->GetArgumentList();
@@ -305,10 +515,12 @@ void BrowserClient::OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFram
 void BrowserClient::OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                               int httpStatusCode) {
   if (!frame->IsMain()) return;
-  ApplyBoost(FindTab(browser->GetIdentifier()));
+  Tab* tab = FindTab(browser->GetIdentifier());
+  ApplyBoost(tab);
+  passwords::FillSavedLogin(tab);  // autofill a saved login for this origin
   // Error pages (status 0) and failed loads are not recorded as history.
   if (httpStatusCode <= 0 || httpStatusCode >= 400) return;
-  if (Tab* tab = FindTab(browser->GetIdentifier())) Application::Get()->RecordVisit(tab);
+  if (tab) Application::Get()->RecordVisit(tab);
 }
 
 void BrowserClient::OnLoadError(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,

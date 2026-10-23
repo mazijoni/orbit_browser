@@ -9,7 +9,7 @@
   verify imports resolve to system DLLs or bundled files only, smoke-test the
   assembled copy from a different path, zip, print SHA-256.
 #>
-param([switch] $SkipBuild)
+param([switch] $SkipBuild, [switch] $SkipSmoke)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $SkipBuild) { & (Join-Path $PSScriptRoot 'build.ps1') -Config Release }
@@ -49,6 +49,7 @@ foreach ($file in 'orbit.exe', 'orbit.dll') {
 if ($problems) { $problems | ForEach-Object { Write-Host "IMPORT PROBLEM: $_" }; throw 'import check failed' }
 Write-Host 'Import check: only system DLLs and bundled files.'
 
+if (-not $SkipSmoke) {
 # --- Smoke test from a path unrelated to the build tree. ---
 $smoke = Join-Path ([IO.Path]::GetTempPath()) "orbit-smoke-$PID"
 Copy-Item -Recurse $stage $smoke
@@ -58,6 +59,7 @@ if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'smoke test timed out' }
 if ($p.ExitCode -ne 0) { Get-Content (Join-Path $data 'selftest-basic.txt') -ErrorAction SilentlyContinue; throw "smoke test failed ($($p.ExitCode))" }
 Remove-Item -Recurse -Force $smoke
 Write-Host 'Smoke test (relocated copy): passed.'
+}
 
 $zip = Join-Path $dist "Orbit-$version-win64.zip"
 if (Test-Path $zip) { Remove-Item $zip }

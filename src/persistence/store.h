@@ -24,11 +24,14 @@ struct WorkspaceRecord {
   std::wstring name;
   uint32_t color = 0;
   std::wstring icon;
-  int position = 0;
-  int kind = 0;  // kKindSpace or kKindEssentials
+  int position = 0;  // spaces: one order for the spaces of every profile
+  int kind = 0;  // kKindSpace, kKindEssentials or kKindLinked
   std::wstring theme;  // gradient picker (SerializeSpaceTheme); empty: the colour alone
+  int64_t owner_id = 0;   // Essentials: the space the grid belongs to
+  int64_t parent_id = 0;  // linked window space: the space it was torn from
   static constexpr int kKindSpace = 0;
   static constexpr int kKindEssentials = 1;
+  static constexpr int kKindLinked = 2;
 };
 
 struct TabRecord {
@@ -77,6 +80,7 @@ struct WindowRecord {
   int64_t active_tab_id = 0;
   int x = 0, y = 0, w = 0, h = 0;
   bool maximized = false;
+  int64_t linked_id = 0;  // the linked window space the window owns (0: none)
 };
 
 struct ClosedTabRecord {
@@ -123,6 +127,16 @@ struct DownloadRecord {
   int64_t ended_at = 0;
 };
 
+struct PasswordRecord {
+  int64_t id = 0;
+  int64_t profile_id = 0;
+  std::wstring origin;    // scheme://host[:port]
+  std::wstring username;
+  std::wstring secret;    // base64 of the DPAPI-protected password (never cleartext)
+  int64_t created_at = 0;
+  int64_t used_at = 0;
+};
+
 // Typed access to browser metadata. All methods run on the UI thread.
 class Store {
  public:
@@ -145,6 +159,10 @@ class Store {
   std::optional<WorkspaceRecord> CreateWorkspace(int64_t profile_id, const std::wstring& name,
                                                  uint32_t color, const std::wstring& icon,
                                                  int kind = WorkspaceRecord::kKindSpace);
+  // Stores |workspace| (its id and position are assigned: a space goes last
+  // in the global order, other kinds have none).
+  std::optional<WorkspaceRecord> CreateWorkspace(const WorkspaceRecord& workspace);
+  // Everything but the id and position (SetWorkspaceOrder) is written.
   bool UpdateWorkspace(const WorkspaceRecord& workspace);
   bool DeleteWorkspace(int64_t id);
   bool SetWorkspaceOrder(const std::vector<int64_t>& ids);
@@ -214,6 +232,16 @@ class Store {
     int visits = 0;
   };
   std::vector<TopSite> TopSites(int64_t profile_id, int limit);
+
+  // Saved passwords. The secret is opaque (DPAPI blob, base64): the store
+  // never sees cleartext. Upsert replaces the secret for an existing
+  // (origin, username). Never written for private profiles.
+  std::vector<PasswordRecord> LoadPasswords(int64_t profile_id);
+  std::vector<PasswordRecord> FindPasswords(int64_t profile_id, const std::wstring& origin);
+  int64_t UpsertPassword(const PasswordRecord& password);
+  bool TouchPassword(int64_t profile_id, int64_t id, int64_t used_at);
+  bool DeletePassword(int64_t profile_id, int64_t id);
+  int PasswordCount(int64_t profile_id);
 
   // Bookmarks.
   std::vector<BookmarkRecord> LoadBookmarks(int64_t profile_id);

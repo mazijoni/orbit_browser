@@ -20,8 +20,11 @@ $work = Join-Path ([IO.Path]::GetTempPath()) "orbit-selftest-$PID"
 function Invoke-Suite([string] $suite, [string] $dataDir) {
   if ($Only.Count -and -not ($Only | Where-Object { $suite -like "$_*" })) { return $true }
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  $p = Start-Process -FilePath $exe -PassThru `
-         -ArgumentList "--user-data-dir=`"$dataDir`"", "--orbit-self-test=$suite"
+  $suiteArgs = @("--user-data-dir=`"$dataDir`"", "--orbit-self-test=$suite")
+  if ($suite -eq 'extensions') {
+    $suiteArgs += "--orbit-test-extension=`"$(Join-Path $root 'tests/fixtures/extension_basic')`""
+  }
+  $p = Start-Process -FilePath $exe -PassThru -ArgumentList $suiteArgs
   if (-not $p.WaitForExit($TimeoutSec * 1000)) {
     $p.Kill()
     Write-Host "[TIMEOUT] $suite"
@@ -48,6 +51,7 @@ $results['services'] = Invoke-Suite 'services' (Join-Path $work 'services')
 $results['memory'] = Invoke-Suite 'memory' (Join-Path $work 'memory')
 $results['security'] = Invoke-Suite 'security' (Join-Path $work 'security')
 $results['zen'] = Invoke-Suite 'zen' (Join-Path $work 'zen')
+$results['extensions'] = Invoke-Suite 'extensions' (Join-Path $work 'extensions')
 $restoreDir = Join-Path $work 'restore'
 $results['restore-1'] = Invoke-Suite 'restore-1' $restoreDir
 $results['restore-2'] = Invoke-Suite 'restore-2' $restoreDir

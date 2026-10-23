@@ -10,6 +10,8 @@ namespace orbit::self_test {
 // Minimal loopback HTTP/1.1 server for self-tests (no internet dependency).
 // Owns one worker thread that is always joined in Stop()/the destructor.
 //   /page?t=<title>[&script=<js>]  HTML page with that title
+//   /text?t=<title>&body=<text>    HTML page with that title and text
+//   /login                         a sign-in form (#u, #p), submit stays on the page
 //   /file.bin                      1 MiB attachment
 //   /attack?target=<orbit url>    page that tries to reach a orbit:// API
 //   /audio                         page playing /tone.wav (title PLAYING once audible)

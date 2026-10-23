@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Orbit Test Extension",
+  "version": "1.0",
+  "description": "Used by the Orbit self-test suite 'extensions'.",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Orbit Test Action",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

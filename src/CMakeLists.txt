@@ -14,6 +14,9 @@ add_library(orbit_core STATIC
   core/live_folders.cpp
   core/space_theme.cpp
   core/boosts.cpp
+  core/json.cpp
+  core/crypto.cpp
+  browser/importer.cpp
   persistence/database.cpp
   persistence/schema.cpp
   persistence/store.cpp
@@ -22,7 +25,7 @@ add_library(orbit_core STATIC
 target_include_directories(orbit_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_options(orbit_core PRIVATE ${ORBIT_CXX_FLAGS})
 target_compile_definitions(orbit_core PUBLIC ${ORBIT_DEFINES})
-target_link_libraries(orbit_core PUBLIC sqlite3 psapi)
+target_link_libraries(orbit_core PUBLIC sqlite3 psapi bcrypt crypt32)
 
 # orbit.dll: the browser. Loaded by orbit.exe (CEF's bootstrap.exe, renamed)
 # which provides the Windows sandbox for all Chromium sub-processes.
@@ -36,6 +39,10 @@ add_library(orbit SHARED
   app/orbit.rc
   browser/browser_client.cpp
   browser/library_client.cpp
+  browser/extension_bridge.cpp
+  browser/extension_popup.cpp
+  browser/default_client.cpp
+  browser/find_bar.cpp
   browser/live_folders.cpp
   browser/text_fetch.cpp
   browser/boost_apply.cpp
@@ -49,11 +56,13 @@ add_library(orbit SHARED
   browser/downloads.cpp
   browser/internal_pages.cpp
   browser/permissions.cpp
+  browser/password_vault.cpp
   browser/profile.cpp
   browser/tab.cpp
   ui/accessibility.cpp
   ui/browser_window.cpp
   ui/browser_window_paint.cpp
+  ui/menu.cpp
   ui/graphics.cpp
   ui/theme.cpp
   ui/toast.cpp

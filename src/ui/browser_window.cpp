@@ -15,6 +15,9 @@
 #include "browser/profile.h"
 #include "browser/tab.h"
 #include "browser/browser_client.h"
+#include "browser/extension_bridge.h"
+#include "browser/extension_popup.h"
+#include "browser/find_bar.h"
 #include "app/orbit_app.h"
 #include "browser/boost_apply.h"
 #include "include/cef_parser.h"
@@ -25,6 +28,7 @@
 #include "core/url_fixup.h"
 #include "include/cef_client.h"
 #include "ui/graphics.h"
+#include "ui/menu.h"
 #include "app/self_test.h"
 #include "ui/share.h"
 
@@ -135,6 +139,7 @@ enum MenuId : UINT {
   kCmdBookmarks,
   kCmdHistory,
   kCmdDownloads,
+  kCmdExtensions,
   kCmdSettings,
   kCmdClearTabs,
   kCmdNewTabGroup,
@@ -155,6 +160,10 @@ enum MenuId : UINT {
   kCmdFolderUnload,
   kCmdSubfolder,
   kCmdFolderToSpace,
+  kCmdSpaceNewProfile,
+  kCmdLinkedShow,
+  kCmdLinkedBringBack,
+  kCmdLinkedClose,
   kCmdWorkspaceBase = 1000,   // + workspace index
   kCmdWindowBase = 2000,      // + window index
   kCmdProfileBase = 3000,     // + profile index
@@ -176,7 +185,13 @@ enum MenuId : UINT {
   kCmdNewLivePulls = 7900,
   kCmdNewLiveIssues,
   kCmdNewLiveRss,
+  kCmdSpaceProfileBase = 8000,  // + profile index ("Profile ▸" in the space menu)
 };
+
+// Tabs move between normal profiles, and within one private session.
+bool CanShareTabs(const Profile* a, const Profile* b) {
+  return a == b || (!a->is_private() && !b->is_private());
+}
 
 constexpr const wchar_t* kColorNames[] = {L"Periwinkle", L"Teal", L"Amber", L"Rose",
                                           L"Violet",     L"Sky",  L"Moss",  L"Gold"};
@@ -232,6 +247,9 @@ BrowserWindow::BrowserWindow(Profile* profile) : profile_(profile) {
                                 ui::metrics::kSidebarMinWidth, ui::metrics::kSidebarMaxWidth);
   }
   collapsed_ = store.GetPref(Store::kGlobalScope, L"sidebar_compact") == L"1";
+  if (auto w = store.GetPref(Store::kGlobalScope, L"devtools_width")) {
+    devtools_width_ = std::clamp(static_cast<float>(_wtof(w->c_str())), 240.f, 2000.f);
+  }
   compact_mode_ = store.GetPref(Store::kGlobalScope, L"sidebar_hidden") == L"1";
 }
 
@@ -433,6 +451,7 @@ void BrowserWindow::ApplyTheme() {
     newtab_button_top_ = on(L"newtab_button_top", true);
     ctrl_tab_skip_pending_ = on(L"ctrl_tab_skip_pending", false);
     grey_out_inactive_ = on(L"grey_out_inactive", true);
+    urlbar_wide_ = on(L"urlbar_wide", false);
     right_side_ = on(L"tabs_right", false);
     multi_toolbar_ = !on(L"single_toolbar", true);  // zen.view.use-single-toolbar
     compact_hide_sidebar_ = on(L"compact_hide_sidebar", true);   // zen.view.compact.hide-tabbar
@@ -662,7 +681,7 @@ void BrowserWindow::Layout() {
   const float sw = SidebarPanelWidth();
   const bool visible = sw > 0.f;
 
-  address_rect_ = site_info_ = star_ = copy_url_ = ws_actions_ = essentials_rect_ = {};
+  address_rect_ = site_info_ = star_ = copy_url_ = ext_btn_ = ws_actions_ = essentials_rect_ = linked_back_ = {};
   menu_ = toggle_ = back_ = forward_ = reload_ = ws_indicator_ = {};
   list_ = footer_ = downloads_ = create_new_ = panel_ = media_card_ = {};
   workspace_dots_.clear();
@@ -686,10 +705,9 @@ void BrowserWindow::Layout() {
   toolbar_ = {};
   if (toolbar_shown()) {
     // #nav-bar: back, forward, reload | the URL field | compact, menu |
-    // window controls (always shown here; tabs on the right mirror it).
-    const D2D1_RECT_F content = ContentRectDip();
-    toolbar_ = {CompactHidesToolbar() ? 0.f : content.left, 0.f, CompactHidesToolbar() ? W : content.right,
-                kToolbarHeight};
+    // window controls. It spans the whole top edge so the sidebar sits below
+    // it, rather than starting at the sidebar's right edge.
+    toolbar_ = {0.f, 0.f, W, kToolbarHeight};
     const float by = (kToolbarHeight - kButton) / 2.f;
     float start = toolbar_.left;
     float end = toolbar_.right;
@@ -704,15 +722,23 @@ void BrowserWindow::Layout() {
       caption_min_ = {caption_max_.left - kCaptionButtonWidth, 0, caption_max_.left, kToolbarHeight};
       end = caption_min_.left - 4.f;
     }
-    back_ = {start, by, start + kButton, by + kButton};
+    // One centred group: back, forward, reload, the URL field (at most 560
+    // wide, or 800 with the "wide URL bar" setting), compact, menu.
+    constexpr float kGap = 6.f;
+    const float left_buttons = 3.f * kButton + 2.f;
+    const float right_buttons = 2.f * kButton + 1.f;
+    const float span = std::max(0.f, end - start - 16.f);
+    const float w = std::clamp(span - left_buttons - right_buttons - 2.f * kGap, 0.f,
+                               urlbar_wide_ ? 800.f : 560.f);
+    const float group = left_buttons + right_buttons + (w > 80.f ? w + 2.f * kGap : kGap);
+    const float gx = start + 8.f + std::max(0.f, (span - group) / 2.f);
+    back_ = {gx, by, gx + kButton, by + kButton};
     forward_ = {back_.right + 1, by, back_.right + 1 + kButton, by + kButton};
     reload_ = {forward_.right + 1, by, forward_.right + 1 + kButton, by + kButton};
-    menu_ = {end - kButton, by, end, by + kButton};
-    toggle_ = {menu_.left - 1 - kButton, by, menu_.left - 1, by + kButton};
-    // The URL field takes the middle (at most 800 wide, centred).
-    const float span_l = reload_.right + 8.f, span_r = toggle_.left - 8.f;
-    const float w = std::clamp(span_r - span_l, 0.f, 800.f);
-    const float al = span_l + (span_r - span_l - w) / 2.f;
+    const float al = reload_.right + kGap;
+    const float after = w > 80.f ? al + w + kGap : al;
+    toggle_ = {after, by, after + kButton, by + kButton};
+    menu_ = {toggle_.right + 1, by, toggle_.right + 1 + kButton, by + kButton};
     const float ay = (kToolbarHeight - kUrlBarHeight) / 2.f;
     if (w > 80.f) {
       address_rect_ = {al, ay, al + w, ay + kUrlBarHeight};
@@ -720,19 +746,32 @@ void BrowserWindow::Layout() {
       if (!profile_->is_private()) {
         star_ = {address_rect_.right - 30, address_rect_.top + 5, address_rect_.right - 4, address_rect_.bottom - 5};
       }
-      const float actions_left = star_.right > star_.left ? star_.left : address_rect_.right - 4;
+      float actions_left = star_.right > star_.left ? star_.left : address_rect_.right - 4;
+      if (ExtensionsButtonShown()) {
+        ext_btn_ = {actions_left - 26, address_rect_.top + 5, actions_left, address_rect_.bottom - 5};
+        actions_left = ext_btn_.left;
+      }
       copy_url_ = {actions_left - 26, address_rect_.top + 5, actions_left, address_rect_.bottom - 5};
     }
   }
 
-  const auto& workspaces = profile_->workspaces();
+  const std::vector<Workspace*> workspaces = Spaces();
   if (visible) {
-    panel_ = {0, 0, sw, H};
-    if (CompactHidesSidebar()) panel_ = {4.f, 4.f, sw - 2.f, H - 4.f};  // floating card
+    // With multiple toolbars the nav bar spans the top; the sidebar sits
+    // below it so the revealed tab list never covers back / forward / reload.
+    const float panel_top = toolbar_shown() ? ui::metrics::kToolbarHeight : 0.f;
+    panel_ = {0, panel_top, sw, H};
+    if (CompactHidesSidebar()) {
+      // Floating card: it overhangs the page card by 4 px at the bottom
+      // (H - 4 vs H - kSeparation) and now by the same at the top (the page
+      // starts at the toolbar's bottom or kSeparation).
+      const float page_top = toolbar_shown() ? kToolbarHeight : kSeparation;
+      panel_ = {4.f, page_top - 4.f, sw - 2.f, H - 4.f};
+    }
     const float l = kInner;
     const float r = sw - kInner;
     if (!collapsed_) {
-      float y = kSeparation;
+      float y = panel_.top + kSeparation;
       if (!multi_toolbar()) {
         // Top row: menu and compact-mode toggle; navigation on the right.
         const float by = (kTopRowHeight - kButton) / 2.f;
@@ -752,13 +791,18 @@ void BrowserWindow::Layout() {
         }
         // zen.urlbar.single-toolbar-show-copy-url: a copy button among the
         // page actions, hidden for pages that are not http(s).
-        const float actions_left = star_.right > star_.left ? star_.left : address_rect_.right - 4;
+        float actions_left = star_.right > star_.left ? star_.left : address_rect_.right - 4;
+        if (ExtensionsButtonShown()) {
+          ext_btn_ = {actions_left - 26, address_rect_.top + 5, actions_left, address_rect_.bottom - 5};
+          actions_left = ext_btn_.left;
+        }
         copy_url_ = {actions_left - 26, address_rect_.top + 5, actions_left, address_rect_.bottom - 5};
         y = address_rect_.bottom + 4;
       }
-      // #zen-essentials: a grid of icon tiles shared by every space.
+      // #zen-essentials: the space's grid of icon tiles.
       essentials_rect_ = {};
-      if (Workspace* ess = profile_->essentials(); ess && !ess->tabs().empty()) {
+      if (Workspace* ess = essentials(); ess && !ess->tabs().empty()) {
+        essentials_rect_ = {l, y, r, y};  // seeds EssentialRects()'s top
         const auto rects = EssentialRects();
         float bottom = y;
         for (const auto& er : rects) bottom = std::max(bottom, er.bottom);
@@ -768,6 +812,10 @@ void BrowserWindow::Layout() {
       // Workspace indicator: the space's name, with an actions button on hover.
       ws_indicator_ = {l, y, r, y + kWorkspaceIndicatorHeight - 6};
       ws_actions_ = {r - 30, ws_indicator_.top + 5, r - 4, ws_indicator_.bottom - 5};
+      // A linked window: "Linked to <parent>" after a back arrow.
+      if (workspace_ && workspace_->is_linked() && workspace_->parent()) {
+        linked_back_ = {l + 4, ws_indicator_.top + 5, l + 30, ws_indicator_.bottom - 5};
+      }
       y = ws_indicator_.bottom + 2;
       // Footer: downloads, workspace switcher, create-new.
       footer_ = {0, H - kFooterHeight, sw, H};
@@ -780,7 +828,7 @@ void BrowserWindow::Layout() {
       const int shown = std::min(count, fit);
       int active = 0;
       for (int i = 0; i < count; ++i) {
-        if (workspaces[static_cast<size_t>(i)].get() == workspace_) active = i;
+        if (workspaces[static_cast<size_t>(i)] == workspace_) active = i;
       }
       first_dot_workspace_ = std::clamp(active - shown / 2, 0, count - shown);
       const float total = shown * kIconButton + (shown - 1) * 3.f;
@@ -800,7 +848,7 @@ void BrowserWindow::Layout() {
     } else {
       // Collapsed: one centered column.
       const float cx = sw / 2.f;
-      float y = 6.f;
+      float y = panel_.top + 6.f;
       auto next = [&](D2D1_RECT_F& rect) {
         rect = {cx - 16.f, y, cx + 16.f, y + 32.f};
         y += 34.f;
@@ -814,7 +862,7 @@ void BrowserWindow::Layout() {
         y += 2.f;
       }
       essentials_rect_ = {};
-      if (Workspace* ess = profile_->essentials(); ess && !ess->tabs().empty()) {
+      if (Workspace* ess = essentials(); ess && !ess->tabs().empty()) {
         const float top = y;
         y += static_cast<float>(ess->tabs().size()) * 40.f;
         essentials_rect_ = {cx - 24.f, top, cx + 24.f, y};
@@ -828,7 +876,7 @@ void BrowserWindow::Layout() {
       fy += 34.f;
       workspace_dots_.push_back({cx - 16.f, fy, cx + 16.f, fy + 32.f});
       for (int i = 0; i < static_cast<int>(workspaces.size()); ++i) {
-        if (workspaces[static_cast<size_t>(i)].get() == workspace_) first_dot_workspace_ = i;
+        if (workspaces[static_cast<size_t>(i)] == workspace_) first_dot_workspace_ = i;
       }
       fy += 34.f;
       create_new_ = {cx - 16.f, fy, cx + 16.f, fy + 32.f};
@@ -839,12 +887,12 @@ void BrowserWindow::Layout() {
   // Tabs on the right: everything above was laid out from x = 0.
   if (visible && right_side_) {
     const float dx = SidebarLeft();
-    for (D2D1_RECT_F* rect : {&address_rect_, &site_info_, &star_, &copy_url_, &ws_actions_,
+    for (D2D1_RECT_F* rect : {&address_rect_, &site_info_, &star_, &copy_url_, &ext_btn_, &ws_actions_, &linked_back_,
                               &essentials_rect_, &menu_, &toggle_, &back_, &forward_, &reload_,
                               &ws_indicator_, &list_, &footer_, &downloads_, &create_new_, &panel_,
                               &media_card_}) {
       const bool in_toolbar = multi_toolbar() && (rect == &address_rect_ || rect == &site_info_ ||
-                                                  rect == &star_ || rect == &copy_url_ || rect == &menu_ ||
+                                                  rect == &star_ || rect == &copy_url_ || rect == &ext_btn_ || rect == &menu_ ||
                                                   rect == &toggle_ || rect == &back_ || rect == &forward_ ||
                                                   rect == &reload_);
       if (rect->right > rect->left && !in_toolbar) {
@@ -885,6 +933,7 @@ void BrowserWindow::Layout() {
   }
   ClampScroll();
   PlaceContent();
+  FindBar::Reposition(this);  // the find bar follows the page area
   Invalidate();
 }
 
@@ -919,6 +968,8 @@ std::vector<BrowserWindow::PaneRect> BrowserWindow::SplitPanes(
 void BrowserWindow::ShowContent() {
   std::vector<Tab*> visible;
   std::vector<RECT> rects;
+  Tab* devtools_tab = nullptr;
+  RECT devtools_rect{};
   if (glance_ && active_tab() == glance_->tab) {
     visible = {glance_->parent, glance_->tab};
     rects = {ContentRectPx(), ToPx(GlanceRectNow(::GetTickCount64()))};
@@ -926,7 +977,10 @@ void BrowserWindow::ShowContent() {
     const auto panes = SplitPanes();
     if (panes.empty()) {
       visible.push_back(tab);
-      rects.push_back(ContentRectPx());
+      RECT page = ContentRectPx(), tools{};
+      if (DevToolsLayout(ContentRectPx(), &page, &tools)) devtools_tab = tab;
+      rects.push_back(page);
+      devtools_rect = tools;
     } else {
       for (const PaneRect& pane : panes) {
         visible.push_back(pane.tab);
@@ -938,7 +992,7 @@ void BrowserWindow::ShowContent() {
   for (Tab* t : content_shown_) {
     if (std::find(visible.begin(), visible.end(), t) != visible.end()) continue;
     const bool alive = (workspace_ && workspace_->IndexOf(t) >= 0) ||
-                       (profile_->essentials() && profile_->essentials()->IndexOf(t) >= 0);
+                       (essentials() && essentials()->IndexOf(t) >= 0);
     if (alive && t->window() == this) t->Hide();
   }
   const bool glancing = glance_ && active_tab() == glance_->tab;
@@ -947,6 +1001,11 @@ void BrowserWindow::ShowContent() {
     // Stacking: the parent, its fade, then the glance (Show raises each).
     if (glancing && i == 1) PlaceGlanceChrome(true);
     visible[i]->Show(rects[i], ContentCornerPx());
+    if (visible[i] == devtools_tab) {
+      visible[i]->ShowDevToolsPane(devtools_rect, ContentCornerPx());
+    } else {
+      visible[i]->HideDevToolsPane();
+    }
   }
   if (glancing && glance_bar_ && glance_animating()) {
     ::ShowWindow(glance_bar_, SW_HIDE);  // the buttons come in once it has landed
@@ -1004,6 +1063,7 @@ void BrowserWindow::TogglePinnedSection() {
 
 BrowserWindow::RowKey BrowserWindow::KeyOf(const Row& row) const {
   if (row.is_group) return {true, static_cast<intptr_t>(row.group_id)};
+  if (row.linked) return {true, -static_cast<intptr_t>(row.linked)};  // folder ids are positive
   return {false, reinterpret_cast<intptr_t>(workspace_->tabs()[static_cast<size_t>(row.tab)].get())};
 }
 
@@ -1093,6 +1153,7 @@ std::vector<BrowserWindow::Row> BrowserWindow::Rows() const {
   const int pinned = workspace_->PinnedCount();
   const bool folded = PinnedSectionCollapsed();
   float y = 0.f;
+  bool periphery = false;
   std::vector<int64_t> open;  // the folders whose headers lead to the current tab
   int64_t last_split = 0;
   auto folded_folder = [&](int64_t id) {
@@ -1100,7 +1161,10 @@ std::vector<BrowserWindow::Row> BrowserWindow::Rows() const {
     return g && g->collapsed;
   };
   for (int i = 0; i < static_cast<int>(tabs.size()); ++i) {
-    if (i == pinned) y += PeripheryHeight();  // separator + "New Tab"
+    if (i == pinned) {
+      y += PeripheryHeight();  // separator + "New Tab"
+      periphery = true;
+    }
     const Tab* tab = tabs[static_cast<size_t>(i)].get();
     if (glance_ && tab == glance_->tab) continue;  // in its parent's row
     if (i < pinned && folded && tab != active_tab()) continue;
@@ -1125,6 +1189,18 @@ std::vector<BrowserWindow::Row> BrowserWindow::Rows() const {
     last_split = split ? split->id : 0;
     rows.push_back({false, i, chain.empty() ? 0 : chain.back(), y, split ? split->id : 0,
                     static_cast<int>(chain.size())});
+    y += kRowHeight;
+  }
+  // The space's linked windows, as collapsed "temp folder" rows at the end.
+  for (Workspace* linked : LinkedChildren()) {
+    if (!periphery) {
+      y += PeripheryHeight();
+      periphery = true;
+    }
+    Row row;
+    row.top = y;
+    row.linked = linked->id();
+    rows.push_back(row);
     y += kRowHeight;
   }
   return rows;
@@ -1258,6 +1334,16 @@ BrowserWindow::Hit BrowserWindow::HitTest(float x, float y) const {
       }
     }
   }
+  {
+    RECT page{}, tools{};
+    if (SplitPanes().empty() && DevToolsLayout(ContentRectPx(), &page, &tools)) {
+      const float left = dip(static_cast<float>(page.right)), right = dip(static_cast<float>(tools.left));
+      if (x >= left - 2.f && x <= right + 2.f && y >= dip(static_cast<float>(tools.top)) &&
+          y < dip(static_cast<float>(tools.bottom))) {
+        return {HitKind::kDevToolsEdge, 0};
+      }
+    }
+  }
   if (multi_toolbar() && ui::Contains(toolbar_, x, y)) {
     if (ui::Contains(menu_, x, y)) return {HitKind::kMenu, 0};
     if (ui::Contains(toggle_, x, y)) return {HitKind::kSidebarToggle, 0};
@@ -1266,6 +1352,7 @@ BrowserWindow::Hit BrowserWindow::HitTest(float x, float y) const {
     if (ui::Contains(reload_, x, y)) return {HitKind::kReload, 0};
     if (ui::Contains(site_info_, x, y)) return {HitKind::kSiteInfo, 0};
     if (ui::Contains(star_, x, y)) return {HitKind::kStar, 0};
+    if (ui::Contains(ext_btn_, x, y)) return {HitKind::kExtensions, 0};
     if (CanCopyUrlFromButton() && ui::Contains(copy_url_, x, y)) return {HitKind::kCopyUrl, 0};
     return {};  // the rest of the toolbar drags the window
   }
@@ -1281,6 +1368,7 @@ BrowserWindow::Hit BrowserWindow::HitTest(float x, float y) const {
   if (ui::Contains(reload_, x, y)) return {HitKind::kReload, 0};
   if (ui::Contains(site_info_, x, y)) return {HitKind::kSiteInfo, 0};
   if (ui::Contains(star_, x, y)) return {HitKind::kStar, 0};
+  if (ui::Contains(ext_btn_, x, y)) return {HitKind::kExtensions, 0};
   if (CanCopyUrlFromButton() && ui::Contains(copy_url_, x, y)) return {HitKind::kCopyUrl, 0};
   if (ui::Contains(essentials_rect_, x, y)) {
     const auto rects = EssentialRects();
@@ -1289,6 +1377,7 @@ BrowserWindow::Hit BrowserWindow::HitTest(float x, float y) const {
     }
     return {};
   }
+  if (ui::Contains(linked_back_, x, y)) return {HitKind::kLinkedBack, 0};
   if (!collapsed_ && ui::Contains(ws_actions_, x, y)) return {HitKind::kWorkspaceActions, 0};
   if (ui::Contains(ws_indicator_, x, y)) return {HitKind::kWorkspaceIndicator, 0};
   if (ui::Contains(media_card_, x, y)) {
@@ -1329,6 +1418,7 @@ BrowserWindow::Hit BrowserWindow::HitTest(float x, float y) const {
         if (ui::Contains(LiveErrorRect(row), x, y)) return {HitKind::kLiveError, GroupIndex(row.group_id)};
         return {HitKind::kGroup, GroupIndex(row.group_id)};
       }
+      if (row.linked) return {HitKind::kLinked, LinkedIndex(row.linked)};
       if (row.split) {
         // Each segment of a split row is its tab (no close button in a split).
         const int n = std::max(1, SplitMemberCount(row));
@@ -1468,6 +1558,49 @@ Tab* BrowserWindow::active_tab() const {
   return workspace_ ? workspace_->active_tab() : nullptr;
 }
 
+bool BrowserWindow::DevToolsLayout(const RECT& content, RECT* page, RECT* tools) const {
+  Tab* tab = active_tab();
+  if (!tab || !tab->devtools_open() || (glance_ && tab == glance_->tab) || content_fullscreen_) return false;
+  const int total = content.right - content.left;
+  const int gap = static_cast<int>(std::lround(px(ui::metrics::kSeparation)));
+  const int min_w = static_cast<int>(std::lround(px(240.f)));
+  if (total < 2 * min_w + gap) return false;
+  const int w = std::clamp(static_cast<int>(std::lround(px(devtools_width_))), min_w, total - min_w - gap);
+  *tools = {content.right - w, content.top, content.right, content.bottom};
+  *page = {content.left, content.top, tools->left - gap, content.bottom};
+  return true;
+}
+
+RECT BrowserWindow::DevToolsRectPx() const {
+  RECT page{}, tools{};
+  if (!SplitPanes().empty() || !DevToolsLayout(ContentRectPx(), &page, &tools)) return {};
+  return tools;
+}
+
+void BrowserWindow::OnDevToolsChanged(Tab* tab) {
+  if (closing_) return;
+  if (tab == active_tab()) ShowContent();
+  Invalidate();
+}
+
+void BrowserWindow::ToggleDevTools() {
+  Tab* tab = active_tab();
+  if (!tab) return;
+  if (tab->devtools_open() || tab->devtools_alive()) {
+    tab->CloseDevTools();
+  } else if (tab->browser()) {
+    tab->ShowDevTools(this);
+  }
+  ShowContent();
+}
+
+void BrowserWindow::InspectElement(Tab* tab, int x, int y) {
+  if (!tab || !tab->browser() || tab != active_tab()) return;
+  const CefPoint at(x, y);
+  tab->ShowDevTools(this, &at);
+  ShowContent();
+}
+
 void BrowserWindow::OnTabChanged(Tab* tab) {
   UpdateMediaCard();
   if (tab == active_tab()) {
@@ -1505,7 +1638,7 @@ void BrowserWindow::OnTabRemoving(Tab* tab) {
   if (tab == rename_tab_) CancelRename();
   if (tab == focus_guard_tab_) focus_guard_tab_ = nullptr;
   // Nothing may keep pointing at a tab that leaves this window.
-  for (Workspace* ws : profile_->containers()) {
+  for (Workspace* ws : Application::Get()->AllContainers()) {
     for (const auto& t : ws->tabs()) {
       if (t->owner() == tab) t->set_owner(nullptr);
     }
@@ -1587,17 +1720,279 @@ void BrowserWindow::OnTabMovedAway(Tab* tab) {
   Layout();
 }
 
+Workspace* BrowserWindow::essentials() const {
+  return workspace_ ? workspace_->essentials_space()->essentials() : nullptr;
+}
+
+bool BrowserWindow::IsEssential(const Tab* tab) const {
+  const Workspace* grid = essentials();
+  return grid && tab && grid->IndexOf(tab) >= 0;
+}
+
+void BrowserWindow::RevealTab(Tab* tab) {
+  Workspace* ws = tab ? tab->workspace() : nullptr;
+  if (!ws) return;
+  if (IsEssential(tab)) {
+    ActivateTab(tab);  // in this window's grid
+    return;
+  }
+  Workspace* space = ws->is_essentials() ? ws->owner() : ws;
+  if (!space) return;
+  if (space != workspace_) SwitchWorkspace(space);
+  if (BrowserWindow* w = space->window()) w->ActivateTab(tab);
+}
+
+std::vector<Workspace*> BrowserWindow::Spaces() const {
+  if (profile_->is_private()) {
+    std::vector<Workspace*> own;
+    for (const auto& ws : profile_->workspaces()) own.push_back(ws.get());
+    return own;
+  }
+  std::vector<Workspace*> spaces = Application::Get()->Spaces();
+  // Linked spaces are listed only in their own window, after their parent.
+  if (linked_space_) {
+    auto at = std::find(spaces.begin(), spaces.end(), linked_space_->parent());
+    spaces.insert(at == spaces.end() ? at : at + 1, linked_space_);
+  }
+  return spaces;
+}
+
+std::vector<Workspace*> BrowserWindow::LinkedChildren() const {
+  std::vector<Workspace*> out;
+  if (!workspace_ || workspace_->is_linked() || workspace_->is_essentials()) return out;
+  for (const auto& ls : workspace_->profile()->linked_spaces()) {
+    if (ls->parent() == workspace_) out.push_back(ls.get());
+  }
+  return out;
+}
+
+int BrowserWindow::LinkedIndex(int64_t linked_id) const {
+  const auto children = LinkedChildren();
+  for (size_t i = 0; i < children.size(); ++i) {
+    if (children[i]->id() == linked_id) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+void BrowserWindow::AdoptLinkedSpace(Workspace* ws) {
+  if (!ws || !ws->is_linked() || !ws->parent() || Application::Get()->WindowOwningLinked(ws)) return;
+  linked_space_ = ws;
+  Layout();
+}
+
+void BrowserWindow::ForgetSpace(Workspace* ws) {
+  pins_collapsed_.erase(ws);
+  last_essential_.erase(ws);
+  if (linked_space_ == ws) linked_space_ = nullptr;
+  if (theme_space_id_ && ws->id() == theme_space_id_) CloseThemePicker();
+}
+
+void BrowserWindow::DetachWorkspace() {
+  CloseGlance();
+  CancelRename();
+  for (Tab* t : content_shown_) t->Hide();
+  content_shown_.clear();
+  if (active_essential_) {
+    active_essential_->Hide();
+    active_essential_ = nullptr;
+  }
+  if (workspace_) {
+    for (const auto& t : workspace_->tabs()) t->Hide();
+    workspace_->set_window(nullptr);
+    workspace_ = nullptr;
+  }
+  linked_space_ = nullptr;
+  media_tab_ = media_dismissed_ = nullptr;
+}
+
+BrowserWindow* BrowserWindow::TearOffTab(Tab* tab, std::optional<POINT> screen) {
+  if (!tab || !workspace_ || workspace_->IndexOf(tab) < 0 || profile_->is_private() || closing_ ||
+      IsGlanceTab(tab) || tab->empty_placeholder()) {
+    return nullptr;
+  }
+  Application* app = Application::Get();
+  // Tearing off from a linked window links to the same parent (no chains).
+  Workspace* parent = workspace_->is_linked() && workspace_->parent() ? workspace_->parent() : workspace_;
+  Workspace* linked = app->CreateLinkedSpace(parent);
+  if (!linked) return nullptr;
+  // As big as this window; where the drag ended, or a little offset.
+  WINDOWPLACEMENT wp{sizeof(wp)};
+  ::GetWindowPlacement(hwnd_, &wp);
+  RECT bounds;
+  ::GetWindowRect(hwnd_, &bounds);
+  WindowRecord place;
+  place.w = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+  place.h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+  if (screen) {
+    place.x = screen->x - static_cast<int>(std::lround(px(80.f)));
+    place.y = screen->y - static_cast<int>(std::lround(px(16.f)));
+  } else {
+    const int step = static_cast<int>(std::lround(px(40.f)));
+    place.x = (::IsZoomed(hwnd_) ? wp.rcNormalPosition.left : bounds.left) + step;
+    place.y = (::IsZoomed(hwnd_) ? wp.rcNormalPosition.top : bounds.top) + step;
+  }
+  // The tab moves first, so the new window opens on it: its live browser is
+  // reparented there and keeps its page (state, history, scroll).
+  OnTabRemoving(tab);
+  std::unique_ptr<Tab> owned = workspace_->RemoveTab(tab);
+  owned->Hide();
+  Tab* moved = linked->InsertTab(std::move(owned), -1);
+  moved->MarkDirty();
+  linked->set_active_tab(moved);
+  place.active_tab_id = moved->id();
+  BrowserWindow* window = app->OpenWindow(profile_, linked, &place);
+  if (!window) {
+    // No window: the tab comes back.
+    std::unique_ptr<Tab> back = linked->RemoveTab(moved);
+    workspace_->InsertTab(std::move(back), -1);
+    app->ReturnLinkedSpace(linked, false, nullptr);
+    OnTabsChanged();
+    return nullptr;
+  }
+  OnTabsChanged();
+  ::SetForegroundWindow(window->hwnd_);
+  return window;
+}
+
+void BrowserWindow::FocusLinkedSpace(Workspace* linked) {
+  if (!linked) return;
+  Application* app = Application::Get();
+  BrowserWindow* w = linked->window() ? linked->window() : app->WindowOwningLinked(linked);
+  if (!w) {
+    w = app->OpenWindow(linked->profile(), linked, nullptr);
+    if (!w) return;
+  } else if (w->workspace_ != linked) {
+    w->SwitchWorkspace(linked);
+  }
+  if (::IsIconic(w->hwnd_)) ::ShowWindow(w->hwnd_, SW_RESTORE);
+  ::SetForegroundWindow(w->hwnd_);
+}
+
+void BrowserWindow::ShowLinkedMenu(Workspace* linked, POINT pt) {
+  if (!linked) return;
+  HMENU menu = ::CreatePopupMenu();
+  ::AppendMenuW(menu, MF_STRING, kCmdLinkedShow, L"Show Window");
+  ::AppendMenuW(menu, MF_STRING, kCmdLinkedBringBack, L"Bring Tabs Back");
+  ::AppendMenuW(menu, MF_STRING, kCmdLinkedClose, L"Close Window");
+  const int64_t id = linked->id();
+  const UINT cmd = static_cast<UINT>(ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, hwnd_, palette_));
+  ::DestroyMenu(menu);
+  Application* app = Application::Get();
+  linked = app->FindSpace(id);  // it may have gone while the menu was open
+  if (!linked || !linked->is_linked()) return;
+  switch (cmd) {
+    case kCmdLinkedShow:
+      FocusLinkedSpace(linked);
+      break;
+    case kCmdLinkedBringBack:
+      app->BringBackLinkedSpace(linked);
+      break;
+    case kCmdLinkedClose:
+      // As closing it: its tabs come back in a folder.
+      if (BrowserWindow* w = app->WindowOwningLinked(linked)) {
+        ::PostMessageW(w->hwnd_, WM_CLOSE, 0, 0);
+      } else {
+        app->ReturnLinkedSpace(linked, /*into_folder=*/true, nullptr);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+Workspace* BrowserWindow::FindSpace(int64_t id) const {
+  return profile_->is_private() ? profile_->FindWorkspace(id) : Application::Get()->FindSpace(id);
+}
+
+std::vector<Workspace*> BrowserWindow::TabContainers() const {
+  if (profile_->is_private()) return profile_->containers();
+  std::vector<Workspace*> out;
+  for (const auto& p : Application::Get()->profiles()) {
+    for (Workspace* ws : p->containers()) out.push_back(ws);
+  }
+  return out;
+}
+
+std::wstring BrowserWindow::SpaceLabel(const Workspace* ws) const {
+  const auto& profiles = Application::Get()->profiles();
+  if (ws->profile()->is_private() || profiles.empty() || ws->profile() == profiles.front().get()) {
+    return ws->record().name;
+  }
+  return ws->record().name + L" (" + ws->profile()->record().name + L")";
+}
+
+void BrowserWindow::OnProfileChanged() {
+  // The panels show pages of the previous profile (its history, downloads,
+  // site data, boosts): they close and are built again in the new one.
+  if (library_open_ || library_browser_ || library_creating_) {
+    library_open_ = false;
+    library_slide_.Jump(0.f);
+    PlaceLibrary();
+    if (library_browser_) library_browser_->GetHost()->CloseBrowser(true);
+  }
+  CloseSiteData();
+  CloseBoostEditor();
+  CloseThemePicker();
+  suggest_text_.clear();
+  suggest_results_.clear();
+}
+
+bool BrowserWindow::MoveSpaceToProfile(Workspace* ws, Profile* profile) {
+  if (!ws || !profile || !Application::Get()->MoveSpaceToProfile(ws, profile)) return false;
+  ShowToast({L"space-profile", ws->record().name + L" now uses " + profile->record().name +
+                                   L": its tabs reload signed out",
+             L"", L"", 4000});
+  return true;
+}
+
+void BrowserWindow::OnSpaceProfileChanged(Workspace* ws) {
+  (void)ws;
+  if (closing_ || !workspace_) return;
+  if (workspace_->profile() != profile_) {
+    profile_ = workspace_->profile();
+    OnProfileChanged();
+    RefreshBackdrop();
+    UpdateAddressBar(true);
+    UpdateTitle();
+  }
+  Layout();  // the switcher's profile badges
+}
+
+void BrowserWindow::ForgetProfile(Profile* profile) {
+  // Pointers this window keeps to the profile's spaces and tabs.
+  if (linked_space_ && linked_space_->profile() == profile) linked_space_ = nullptr;
+  for (Workspace* ws : profile->containers()) {
+    pins_collapsed_.erase(ws);
+    last_essential_.erase(ws);
+    for (const auto& t : ws->tabs()) {
+      favicons_.erase(t.get());
+      pinned_favicons_.erase(t.get());
+      overlay_favicons_.erase(t.get());
+      overlay_pinned_favicons_.erase(t.get());
+      if (media_tab_ == t.get()) media_tab_ = nullptr;
+      if (media_dismissed_ == t.get()) media_dismissed_ = nullptr;
+      if (focus_guard_tab_ == t.get()) focus_guard_tab_ = nullptr;
+      if (rename_tab_ == t.get()) CancelRename();
+    }
+  }
+  for (Workspace* ws : Application::Get()->AllContainers()) {
+    for (const auto& t : ws->tabs()) {
+      if (t->owner() && t->owner()->profile() == profile) t->set_owner(nullptr);
+    }
+  }
+}
+
 bool BrowserWindow::CanAddToEssentials(const Tab* tab) const {
   // canEssentialBeAdded: up to zen.tabs.essentials.max; tabs in a folder offer
   // no "Add to Essentials" (the menu item is hidden for them).
-  if (!tab || profile_->IsEssential(tab) || tab->record().group_id) return false;
-  const Workspace* ess = profile_->essentials();
+  if (!tab || IsEssential(tab) || tab->record().group_id) return false;
+  const Workspace* ess = essentials();
   return !ess || static_cast<int>(ess->tabs().size()) < kMaxEssentials;
 }
 
 bool BrowserWindow::AddToEssentials(Tab* tab) {
   if (!CanAddToEssentials(tab) || !workspace_ || workspace_->IndexOf(tab) < 0) return false;
-  Workspace* ess = profile_->EnsureEssentials();
+  Workspace* ess = workspace_->essentials_space()->EnsureEssentials();
   if (!ess) return false;
   const bool was_active = tab == active_tab();
   std::unique_ptr<Tab> owned = workspace_->RemoveTab(tab);
@@ -1621,7 +2016,7 @@ bool BrowserWindow::AddToEssentials(Tab* tab) {
 
 void BrowserWindow::RemoveFromEssentials(Tab* tab) {
   // removeEssentials(tab, unpin = true): back into the current space, unpinned.
-  Workspace* ess = profile_->essentials();
+  Workspace* ess = essentials();
   if (!ess || ess->IndexOf(tab) < 0 || !workspace_) return;
   const bool was_active = tab == active_essential_;
   for (BrowserWindow* w : Application::Get()->WindowsShowing(ess)) {
@@ -1691,6 +2086,11 @@ void BrowserWindow::ShowWorkspace(Workspace* workspace, int64_t active_tab_id, b
   }
   workspace_ = workspace;
   workspace_->set_window(this);
+  if (workspace_->is_linked()) linked_space_ = workspace_;
+  if (workspace_->profile() != profile_) {
+    profile_ = workspace_->profile();
+    OnProfileChanged();
+  }
   // Live tabs hosted by another window move here so that closing that window
   // cannot unload them behind this one's back.
   for (const auto& t : workspace_->tabs()) {
@@ -1717,7 +2117,7 @@ void BrowserWindow::ShowWorkspace(Workspace* workspace, int64_t active_tab_id, b
   }
   // lastSelectedWorkspaceTabs: a space left on an Essential returns to it.
   if (auto it = last_essential_.find(workspace_);
-      it != last_essential_.end() && it->second && profile_->IsEssential(it->second) &&
+      it != last_essential_.end() && it->second && IsEssential(it->second) &&
       !active_tab_id && !start_empty) {
     Tab* remembered = workspace_->active_tab();
     ActivateTab(it->second);
@@ -1805,7 +2205,7 @@ Tab* BrowserWindow::CreatePopupTab(Tab* opener, const std::wstring& url, bool ac
 }
 
 void BrowserWindow::ActivateTab(Tab* tab) {
-  const bool essential = profile_->IsEssential(tab);
+  const bool essential = IsEssential(tab);
   if (!workspace_ || !tab || (!essential && workspace_->IndexOf(tab) < 0)) return;
   Tab* previous = active_tab();
   if (previous == tab) {
@@ -1838,6 +2238,7 @@ void BrowserWindow::ActivateTab(Tab* tab) {
   tab->TouchActive();
   tab->EnsureBrowser(this);
   ShowContent();
+  FindBar::OnActiveTabChanged(this);  // a find bar searches one page
   EnsureTabVisible(workspace_->IndexOf(tab));
   if (popup_visible_) HideFloatingUrlBar(false);
   address_editing_ = false;
@@ -1959,33 +2360,54 @@ void BrowserWindow::TogglePin(Tab* tab) {
 }
 
 void BrowserWindow::MoveTabToWorkspace(Tab* tab, Workspace* target) {
-  if (!target || target == workspace_ || target->profile() != profile_) return;
+  if (!target || !workspace_ || target == workspace_ || workspace_->IndexOf(tab) < 0 ||
+      target->is_essentials() || !CanShareTabs(profile_, target->profile())) {
+    return;
+  }
   if (target->window() && target->window() != this) {
     MoveTabToWindow(tab, target->window());
     return;
   }
+  // A Chromium browser keeps the storage it was created with: a tab that
+  // changes profile unloads and loads again there (signed out).
+  const bool other_profile = target->profile() != profile_;
   OnTabRemoving(tab);
   std::unique_ptr<Tab> owned = workspace_->RemoveTab(tab);
   owned->Hide();
   Tab* moved = target->InsertTab(std::move(owned), -1);
   moved->MarkDirty();  // persists the new workspace_id
+  if (other_profile) {
+    moved->UnloadForProfileChange();
+    ShowToast({L"tab-profile", L"Moved to " + target->profile()->record().name + L": it reloads signed out",
+               L"", L"", 4000});
+  }
   OnTabsChanged();
 }
 
 void BrowserWindow::MoveTabToWindow(Tab* tab, BrowserWindow* target) {
-  // Tabs may only move between windows of the same profile: a Chromium
-  // browser's request context (storage partition) is fixed at creation.
-  if (!target || target == this || target->profile_ != profile_ || !target->workspace_) return;
+  if (!target || target == this || !target->workspace_ || !workspace_ || workspace_->IndexOf(tab) < 0 ||
+      !CanShareTabs(profile_, target->profile_)) {
+    return;
+  }
+  const bool other_profile = target->profile_ != profile_;
   OnTabRemoving(tab);
   std::unique_ptr<Tab> owned = workspace_->RemoveTab(tab);
   owned->Hide();
   Tab* moved = target->workspace_->InsertTab(std::move(owned), -1);
   moved->MarkDirty();
-  if (moved->has_browser() || moved->load_state() == Tab::LoadState::kCreating) {
-    moved->Reparent(target);
+  if (moved->has_browser() || moved->load_state() != Tab::LoadState::kUnloaded) {
+    moved->Reparent(target);  // the page keeps its state (same profile)
   }
+  // Another profile: the browser's storage is fixed, so it loads again there.
+  if (other_profile) moved->UnloadForProfileChange();
   target->ActivateTab(moved);
+  target->DropEmptyPlaceholder(moved);
   target->Layout();
+  if (other_profile) {
+    target->ShowToast({L"tab-profile", L"Moved to " + target->profile_->record().name +
+                                           L": it reloads signed out",
+                       L"", L"", 4000});
+  }
   ::SetForegroundWindow(target->hwnd_);
   OnTabsChanged();
 }
@@ -1998,7 +2420,7 @@ void BrowserWindow::SelectRelativeTab(int delta) {
   std::vector<Tab*> tabs;
   const bool within = PrefEnabled(L"ctrl_tab_ignore_essentials", false);
   const bool from_essential = active_essential_ != nullptr;
-  if (const Workspace* ess = profile_->essentials(); ess && (!within || from_essential)) {
+  if (const Workspace* ess = essentials(); ess && (!within || from_essential)) {
     for (const auto& t : ess->tabs()) tabs.push_back(t.get());
   }
   if (!within || !from_essential) {
@@ -2029,18 +2451,18 @@ void BrowserWindow::SelectTabIndex(int index) {
 }
 
 void BrowserWindow::SelectRelativeWorkspace(int delta) {
-  const auto& workspaces = profile_->workspaces();
+  const std::vector<Workspace*> workspaces = Spaces();
   const int n = static_cast<int>(workspaces.size());
   if (n < 2) return;
   int index = 0;
   for (int i = 0; i < n; ++i) {
-    if (workspaces[static_cast<size_t>(i)].get() == workspace_) index = i;
+    if (workspaces[static_cast<size_t>(i)] == workspace_) index = i;
   }
   // zen.workspaces.wrap-around-navigation (default on): past the last space
   // comes the first. Spaces shown in other windows are skipped.
   for (int step = 1; step < n; ++step) {
     const int i = ((index + delta * step) % n + n) % n;
-    Workspace* ws = workspaces[static_cast<size_t>(i)].get();
+    Workspace* ws = workspaces[static_cast<size_t>(i)];
     if (!ws->window() || ws->window() == this) {
       SwitchWorkspace(ws);
       return;
@@ -2056,12 +2478,12 @@ void BrowserWindow::SwitchWorkspace(Workspace* target) {
     ::SetForegroundWindow(other->hwnd_);
     return;
   }
-  const auto& spaces = profile_->workspaces();
+  const std::vector<Workspace*> spaces = Spaces();
   int from = -1;
   int to = -1;
   for (size_t i = 0; i < spaces.size(); ++i) {
-    if (spaces[i].get() == workspace_) from = static_cast<int>(i);
-    if (spaces[i].get() == target) to = static_cast<int>(i);
+    if (spaces[i] == workspace_) from = static_cast<int>(i);
+    if (spaces[i] == target) to = static_cast<int>(i);
   }
   if (from >= 0 && to >= 0) {
     BeginSpaceSwitchAnimation(orbit::SpaceSwitchStep(from, to, static_cast<int>(spaces.size())));
@@ -2142,8 +2564,9 @@ void BrowserWindow::UpdateAnimationTimer(uint64_t now) {
 // Library panel (ZenLibrary)
 
 float BrowserWindow::LibraryWidth() const {
-  // width: clamp(418px, var(--zen-library-content-width), 95vw)
-  return std::clamp(640.f, 418.f, std::max(418.f, Width() * 0.95f));
+  // Zen: clamp(418px, var(--zen-library-content-width), 95vw). Orbit keeps it
+  // closer to the sidebar's scale: 440, at most 95% of the window.
+  return std::clamp(440.f, 340.f, std::max(340.f, Width() * 0.95f));
 }
 
 int BrowserWindow::library_browser_id() const {
@@ -2269,7 +2692,7 @@ void BrowserWindow::OnLibraryClosed(CefRefPtr<CefBrowser> browser) {
 void BrowserWindow::LibraryShowSpace(int64_t space_id, int tab_index) {
   // ZenLibrarySpacesSection: a space card switches to it; a tab row also
   // selects that tab.
-  Workspace* target = profile_->FindWorkspace(space_id);
+  Workspace* target = FindSpace(space_id);
   if (!target) return;
   CloseLibrary();
   if (target != workspace_) SwitchWorkspace(target);
@@ -2288,7 +2711,7 @@ void BrowserWindow::UpdateMediaCard() {
   Tab* best = nullptr;
   ULONGLONG best_start = 0;
   const bool waiting = ::GetTickCount64() < media_hidden_until_;
-  for (Workspace* ws : profile_->containers()) {
+  for (Workspace* ws : TabContainers()) {
     for (const auto& t : ws->tabs()) {
       if (t->close_requested()) continue;  // about to go away
       const Tab::MediaState m = t->media();
@@ -2318,14 +2741,7 @@ void BrowserWindow::MediaCommand(const char* command) {
   if (!tab) return;
   const std::string cmd = command;
   if (cmd == "focus") {
-    // .zen-media-focus-button: show the tab that plays.
-    Workspace* ws = tab->workspace();
-    if (profile_->IsEssential(tab)) {
-      ActivateTab(tab);
-    } else if (ws) {
-      if (ws != workspace_) SwitchWorkspace(ws);
-      if (BrowserWindow* w = ws->window()) w->ActivateTab(tab);
-    }
+    RevealTab(tab);  // .zen-media-focus-button: show the tab that plays
     return;
   }
   if (cmd == "mute") {
@@ -2556,7 +2972,7 @@ std::wstring BrowserWindow::theme_picker_title() const {
 }
 
 Workspace* BrowserWindow::theme_editing_space() const {
-  return theme_space_id_ ? profile_->FindWorkspace(theme_space_id_) : nullptr;
+  return theme_space_id_ ? FindSpace(theme_space_id_) : nullptr;
 }
 
 void BrowserWindow::CloseThemePicker() {
@@ -2585,7 +3001,13 @@ void BrowserWindow::OnThemePickerCreated(CefRefPtr<CefBrowser> browser) {
 void BrowserWindow::OnThemePickerClosed(CefRefPtr<CefBrowser> browser) {
   if (theme_browser_ && theme_browser_->IsSame(browser)) theme_browser_ = nullptr;
   theme_creating_ = false;
-  if (closing_) Application::Get()->OnWindowBrowserClosed();
+  if (closing_) {
+    Application::Get()->OnWindowBrowserClosed();
+  } else if (theme_picker_open() && !theme_browser_) {
+    // Reopened while the old browser was still closing (ExecuteJavaScript went
+    // to the dying browser): build the new one now.
+    OpenThemePicker(theme_editing_space());
+  }
 }
 
 std::wstring BrowserWindow::site_data_title() const {
@@ -3070,9 +3492,9 @@ void BrowserWindow::SplitOut(Tab* tab) {
 
 void BrowserWindow::NewWorkspace() {
   if (profile_->is_private()) return;
-  std::wstring name = L"Space " + std::to_wstring(profile_->workspaces().size() + 1);
+  std::wstring name = L"Space " + std::to_wstring(Spaces().size() + 1);
   if (!PromptText(L"New workspace", L"Workspace name:", name) || name.empty()) return;
-  const size_t n = profile_->workspaces().size();
+  const size_t n = Spaces().size();
   const uint32_t color = ui::kAccentChoices[n % std::size(ui::kAccentChoices)];
   if (Workspace* ws = Application::Get()->CreateWorkspace(profile_, name, color)) {
     SwitchWorkspace(ws);
@@ -3088,9 +3510,8 @@ void BrowserWindow::RenameWorkspace(Workspace* ws) {
 }
 
 void BrowserWindow::DeleteWorkspace(Workspace* ws) {
-  if (profile_->workspaces().size() <= 1) {
-    ::MessageBoxW(hwnd_, L"A profile needs at least one workspace.", L"Orbit",
-                  MB_OK | MB_ICONINFORMATION);
+  if (Spaces().size() <= 1) {
+    ::MessageBoxW(hwnd_, L"Orbit needs at least one space.", L"Orbit", MB_OK | MB_ICONINFORMATION);
     return;
   }
   if (ws->window() && ws->window() != this) return;
@@ -3101,17 +3522,21 @@ void BrowserWindow::DeleteWorkspace(Workspace* ws) {
     return;
   }
   if (ws == workspace_) {
-    for (const auto& other : profile_->workspaces()) {
-      if (other.get() != ws && !other->window()) {
-        ShowWorkspace(other.get(), 0);
+    for (Workspace* other : Spaces()) {
+      if (other != ws && !other->window()) {
+        ShowWorkspace(other, 0);
         break;
       }
     }
     if (ws == workspace_) return;  // every other workspace is open elsewhere
   }
-  // Free live browsers; the rows go away with the workspace (ON DELETE CASCADE).
+  // Free live browsers; the rows go away with the workspace (ON DELETE
+  // CASCADE), its Essentials too.
   for (const auto& t : ws->tabs()) t->Unload(false);
-  if (!profile_->is_private()) Application::Get()->store().DeleteWorkspace(ws->id());
+  if (Workspace* grid = ws->essentials()) {
+    for (const auto& t : grid->tabs()) t->Unload(false);
+  }
+  if (!ws->profile()->is_private()) Application::Get()->store().DeleteWorkspace(ws->id());
   pins_collapsed_.erase(ws);
   last_essential_.erase(ws);
   Application::Get()->RetireWorkspace(ws);
@@ -3392,9 +3817,9 @@ void BrowserWindow::UpdateUrlResults() {
   }
   OmniboxSources sources;
   if (!text.empty()) {
-    // Open tabs of this profile, most recently used first.
+    // Open tabs (of every normal profile), most recently used first.
     std::vector<Tab*> tabs;
-    for (Workspace* ws : profile_->containers()) {
+    for (Workspace* ws : TabContainers()) {
       for (const auto& t : ws->tabs()) tabs.push_back(t.get());
     }
     std::sort(tabs.begin(), tabs.end(),
@@ -3543,18 +3968,12 @@ void BrowserWindow::ActivateUrlResult(int index) {
   }
   if (row.kind == OmniboxRow::Kind::kSwitchTab) {
     // Switch to Tab: never opens anything; the bar closes over the tab.
-    for (Workspace* ws : profile_->containers()) {
+    for (Workspace* ws : TabContainers()) {
       for (const auto& t : ws->tabs()) {
         if (reinterpret_cast<intptr_t>(t.get()) != row.tab_key) continue;
-        Tab* target = t.get();
         if (new_tab_mode_) new_tab_navigated_ = true;
         HideFloatingUrlBar(true);
-        if (ws == profile_->essentials()) {
-          ActivateTab(target);  // shown in every space
-          return;
-        }
-        if (ws != workspace_) SwitchWorkspace(ws);
-        if (BrowserWindow* w = ws->window()) w->ActivateTab(target);
+        RevealTab(t.get());
         return;
       }
     }
@@ -3754,8 +4173,8 @@ std::vector<OmniboxAction> BrowserWindow::QuickActions() const {
   }
   if (active_essential_) out.push_back({L"remove-essential", L"Remove from Essentials", L""});
   // "Focus on <space>" for every other space (matched by its name).
-  for (const auto& ws : profile_->workspaces()) {
-    if (ws.get() == workspace_) continue;
+  for (Workspace* ws : Spaces()) {
+    if (ws == workspace_) continue;
     out.push_back({L"space:" + std::to_wstring(ws->id()), L"Focus on " + ws->record().name,
                    ws->record().name});
   }
@@ -3766,7 +4185,7 @@ void BrowserWindow::RunQuickAction(const std::wstring& id) {
   Tab* tab = active_tab();
   Application* app = Application::Get();
   if (id.rfind(L"space:", 0) == 0) {
-    if (Workspace* ws = profile_->FindWorkspace(_wtoi64(id.c_str() + 6))) SwitchWorkspace(ws);
+    if (Workspace* ws = FindSpace(_wtoi64(id.c_str() + 6))) SwitchWorkspace(ws);
   } else if (id == L"compact-mode") {
     ToggleCompactMode();
   } else if (id == L"library") {
@@ -3814,9 +4233,17 @@ bool BrowserWindow::RunShortcutAction(const std::wstring& id) {
   Tab* tab = active_tab();
   if (id.rfind(L"space-", 0) == 0) {
     const int n = _wtoi(id.c_str() + 6);
-    const auto& spaces = profile_->workspaces();
+    const std::vector<Workspace*> spaces = Spaces();
     if (n < 1 || n > static_cast<int>(spaces.size())) return true;
-    SwitchWorkspace(spaces[static_cast<size_t>(n - 1)].get());
+    SwitchWorkspace(spaces[static_cast<size_t>(n - 1)]);
+  } else if (id == L"find") {
+    FindBar::Open(this);
+  } else if (id == L"find-next") {
+    FindBar::FindNext(this, true);
+  } else if (id == L"find-previous") {
+    FindBar::FindNext(this, false);
+  } else if (id == L"extensions") {
+    if (!profile_->is_private()) OpenInternalPage(kPageExtensions);
   } else if (id == L"duplicate-tab") {
     if (tab) DuplicateTab(tab);
   } else if (id == L"reset-pinned-tab") {
@@ -3876,6 +4303,9 @@ bool BrowserWindow::DispatchAccelerator(int vk, bool ctrl, bool shift, bool alt)
       case 'O':
         if (!glance_) return false;
         ExpandGlance();  // Zen: cmd_zenGlanceExpand
+        return true;
+      case 'F':
+        FindBar::Open(this);
         return true;
       case 'L':
       case 'K':
@@ -3975,16 +4405,14 @@ bool BrowserWindow::DispatchAccelerator(int vk, bool ctrl, bool shift, bool alt)
       case '8':  // Shift+8 is "*" on US layouts
         NewEmptySplit();  // Zen: cmd_zenNewEmptySplit (accel+shift+*)
         return true;
+      case 'A':
+        if (!profile_->is_private()) OpenInternalPage(kPageExtensions);  // Zen: the add-ons manager
+        return true;
       case 'D':
         TogglePinActiveTab();  // Zen: cmd_zenTogglePinTab
         return true;
       case 'I':
-        if (tab && tab->browser()) {
-          CefWindowInfo info;
-          info.SetAsPopup(hwnd_, L"Developer Tools");
-          tab->browser()->GetHost()->ShowDevTools(info, nullptr, CefBrowserSettings(),
-                                                  CefPoint());
-        }
+        ToggleDevTools();
         return true;
       default:
         return false;
@@ -4016,6 +4444,9 @@ bool BrowserWindow::DispatchAccelerator(int vk, bool ctrl, bool shift, bool alt)
         } else {
           OpenLocation();
         }
+        return true;
+      case VK_F3:
+        FindBar::FindNext(this, !shift);
         return true;
       case VK_F11:
         ToggleWindowFullscreen();
@@ -4051,7 +4482,23 @@ bool BrowserWindow::OnKeyDown(int vk) {
     focus_row_ = std::max(0, RowOfTab(rows, workspace_->IndexOf(active_tab())));
   }
   const Row& row = rows[static_cast<size_t>(focus_row_)];
-  Tab* tab = row.is_group ? nullptr : workspace_->tabs()[static_cast<size_t>(row.tab)].get();
+  if (row.linked) {
+    const auto children = LinkedChildren();
+    const int k = LinkedIndex(row.linked);
+    Workspace* linked = k >= 0 ? children[static_cast<size_t>(k)] : nullptr;
+    if (linked && (vk == VK_RETURN || vk == VK_SPACE)) {
+      FocusLinkedSpace(linked);
+      return true;
+    }
+    if (linked && vk == VK_APPS) {
+      const D2D1_RECT_F r = RowRect(row);
+      POINT pt{static_cast<LONG>(px(r.left + 20)), static_cast<LONG>(px(r.bottom))};
+      ::ClientToScreen(hwnd_, &pt);
+      ShowLinkedMenu(linked, pt);
+      return true;
+    }
+  }
+  Tab* tab = row.is_group || row.linked ? nullptr : workspace_->tabs()[static_cast<size_t>(row.tab)].get();
   switch (vk) {
     case VK_UP:
       focus_row_ = std::max(0, focus_row_ - 1);
@@ -4076,7 +4523,7 @@ bool BrowserWindow::OnKeyDown(int vk) {
     case VK_SPACE:
       if (tab) {
         ActivateTab(tab);
-      } else {
+      } else if (row.is_group) {
         ToggleGroup(row.group_id);
       }
       return true;
@@ -4089,7 +4536,7 @@ bool BrowserWindow::OnKeyDown(int vk) {
       ::ClientToScreen(hwnd_, &pt);
       if (tab) {
         ShowTabMenu(tab, pt);
-      } else {
+      } else if (row.is_group) {
         ShowGroupMenu(row.group_id, pt);
       }
       return true;
@@ -4177,7 +4624,7 @@ void BrowserWindow::BeginClose() {
   }
   ::ShowWindow(hwnd_, SW_HIDE);
   if (workspace_) workspace_->set_window(nullptr);
-  for (Workspace* ws : profile_->containers()) {
+  for (Workspace* ws : Application::Get()->AllContainers()) {
     for (const auto& t : ws->tabs()) {
       if (t->window() == this) t->Unload(false);
     }
@@ -4189,6 +4636,7 @@ WindowRecord BrowserWindow::ToRecord() const {
   rec.profile_id = profile_->id();
   rec.workspace_id = workspace_ ? workspace_->id() : 0;
   rec.active_tab_id = active_tab() ? active_tab()->id() : 0;
+  rec.linked_id = linked_space_ ? linked_space_->id() : 0;
   WINDOWPLACEMENT wp{sizeof(wp)};
   if (chrome_hidden()) {
     wp = saved_placement_;
@@ -4327,6 +4775,7 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOVE:
       if (Tab* tab = active_tab(); tab && tab->browser()) {
         tab->browser()->GetHost()->NotifyMoveOrResizeStarted();
+        if (tab->devtools_open()) ShowContent();  // their pane is a popup over the page area
       }
       if (popup_visible_) PositionFloatingUrlBar();
       if (toast_) toast_->Reposition();
@@ -4338,6 +4787,16 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
       dpi_ = HIWORD(wp);
       const RECT* r = reinterpret_cast<const RECT*>(lp);
       if (rt_) rt_->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
+      // The compact-mode card has its own target, created at the old DPI:
+      // it is rebuilt (with its region and favicon bitmaps) at the new one.
+      overlay_rt_.Reset();
+      overlay_brush_.Reset();
+      overlay_favicons_.clear();
+      overlay_pinned_favicons_.clear();
+      overlay_size_ = {};
+      grain_brush_.Reset();
+      grain_rt_ = nullptr;
+      space_snapshot_.Reset();
       ::SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
                      SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
       ApplyTheme();  // recreates the DPI-dependent address bar font
@@ -4426,8 +4885,8 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MBUTTONUP: {
       const Hit hit = HitTest(dip(static_cast<float>(LParamX(lp))),
                               dip(static_cast<float>(LParamY(lp))));
-      if (hit.kind == HitKind::kEssential && profile_->essentials()) {
-        PinnedCloseShortcut(profile_->essentials()->tabs()[static_cast<size_t>(hit.index)].get(),
+      if (hit.kind == HitKind::kEssential && essentials()) {
+        PinnedCloseShortcut(essentials()->tabs()[static_cast<size_t>(hit.index)].get(),
                             /*close_if_unloaded=*/true);
         return 0;
       }
@@ -4449,6 +4908,7 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         split_drag_.reset();
         dragging_tab_ = false;
         resizing_sidebar_ = false;
+        resizing_devtools_ = false;
         pressed_ = {};
         Invalidate();
       }
@@ -4483,7 +4943,8 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         ::GetCursorPos(&pt);
         ::ScreenToClient(hwnd_, &pt);
         const Hit hit = HitTest(dip(static_cast<float>(pt.x)), dip(static_cast<float>(pt.y)));
-        const bool resize = resizing_sidebar_ || hit.kind == HitKind::kSidebarEdge;
+        const bool resize = resizing_sidebar_ || hit.kind == HitKind::kSidebarEdge || resizing_devtools_ ||
+                            hit.kind == HitKind::kDevToolsEdge;
         LPCWSTR cursor = resize ? IDC_SIZEWE : IDC_ARROW;
         if (split_drag_) {
           cursor = split_drag_->vertical ? IDC_SIZEWE : IDC_SIZENS;
@@ -4518,14 +4979,15 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
       HandleAccessibleInvoke(static_cast<int>(wp), static_cast<intptr_t>(lp));
       return 0;
     case kRecreateTabMessage: {
-      // A tab reset to its pinned page: give it a fresh browser.
+      // A tab reset to its pinned page gets a fresh browser; a tab that moved
+      // to another profile (wParam 1) only when it is on screen.
       Tab* t = reinterpret_cast<Tab*>(lp);
-      if (workspace_ && workspace_->IndexOf(t) >= 0 && !t->has_browser() && !closing_) {
+      if (workspace_ && (workspace_->IndexOf(t) >= 0 || IsEssential(t)) && !t->has_browser() && !closing_) {
+        const bool shown = t == active_tab() ||
+                           std::find(content_shown_.begin(), content_shown_.end(), t) != content_shown_.end();
+        if (wp == 1 && !shown) return 0;
         t->EnsureBrowser(this);
-        if (t == active_tab() || std::find(content_shown_.begin(), content_shown_.end(), t) !=
-                                     content_shown_.end()) {
-          ShowContent();
-        }
+        if (shown) ShowContent();
       }
       return 0;
     }
@@ -4666,15 +5128,21 @@ void BrowserWindow::OnMouseMove(float x, float y, WPARAM keys) {
     Layout();
     return;
   }
+  if (resizing_devtools_) {
+    const RECT content = ContentRectPx();
+    devtools_width_ = std::max(240.f, dip(static_cast<float>(content.right)) - x);
+    ShowContent();
+    return;
+  }
   if ((keys & MK_LBUTTON) && pressed_.kind == HitKind::kWorkspace && !collapsed_ && workspace_) {
     if (!reordering_spaces_ && std::fabs(px(x) - static_cast<float>(press_px_.x)) > px(5.f)) reordering_spaces_ = true;
     if (reordering_spaces_) {
       // The dragged icon goes before or after the icon under the pointer
       // (by its halves), as the toolbarbuttons are re-inserted in Zen.
-      const auto& spaces = profile_->workspaces();
+      const std::vector<Workspace*> spaces = Spaces();
       const int from = pressed_.index;
       if (from >= 0 && from < static_cast<int>(spaces.size())) {
-        Workspace* dragged = spaces[static_cast<size_t>(from)].get();
+        Workspace* dragged = spaces[static_cast<size_t>(from)];
         for (size_t i = 0; i < workspace_dots_.size(); ++i) {
           const int index = first_dot_workspace_ + static_cast<int>(i);
           const D2D1_RECT_F& r = workspace_dots_[i];
@@ -4683,7 +5151,7 @@ void BrowserWindow::OnMouseMove(float x, float y, WPARAM keys) {
           int to = before ? index : index + 1;
           if (to > from) --to;
           if (to != from) {
-            profile_->MoveWorkspace(dragged, to);
+            Application::Get()->MoveSpace(dragged, to);
             pressed_.index = to;
             Layout();
           }
@@ -4718,6 +5186,8 @@ void BrowserWindow::OnMouseMove(float x, float y, WPARAM keys) {
       if (y > list_.bottom - 12.f) scroll_ += 6.f;
       ClampScroll();
       drop_index_ = index;
+      const Hit over = HitTest(x, y);
+      drop_linked_ = over.kind == HitKind::kLinked ? over.index : -1;
       Invalidate();
       return;
     }
@@ -4765,6 +5235,7 @@ void BrowserWindow::OnLButtonDown(float x, float y) {
     }
   }
   if (pressed_.kind == HitKind::kSidebarEdge) resizing_sidebar_ = true;
+  if (pressed_.kind == HitKind::kDevToolsEdge) resizing_devtools_ = true;
   Invalidate();
 }
 
@@ -4800,6 +5271,18 @@ void BrowserWindow::OnLButtonUp(float x, float y) {
     if (workspace_) workspace_->SaveSplit(id);
     return;
   }
+  if (resizing_devtools_) {
+    resizing_devtools_ = false;
+    pressed_ = {};
+    if (::GetCapture() == hwnd_) ::ReleaseCapture();
+    Application::Get()->store().SetPref(Store::kGlobalScope, L"devtools_width",
+                                        std::to_wstring(static_cast<int>(devtools_width_)));
+    for (const auto& w : Application::Get()->windows()) {
+      w->devtools_width_ = devtools_width_;
+      if (w.get() != this) w->ShowContent();
+    }
+    return;
+  }
   const Hit pressed = pressed_;
   const bool was_dragging = dragging_tab_;
   const bool was_resizing = resizing_sidebar_;
@@ -4820,18 +5303,55 @@ void BrowserWindow::OnLButtonUp(float x, float y) {
                                         std::to_wstring(static_cast<int>(sidebar_width_)));
     return;
   }
+  const int dropped_on_linked = drop_linked_;
+  drop_linked_ = -1;
   if (was_dragging && workspace_ && drag_from_ >= 0 &&
       drag_from_ < static_cast<int>(workspace_->tabs().size())) {
+    Tab* tab = workspace_->tabs()[static_cast<size_t>(drag_from_)].get();
+    // Released outside this window: over another Orbit window, the tab moves
+    // into its space; anywhere else it tears off into a linked window.
+    POINT screen;
+    ::GetCursorPos(&screen);
+    const HWND under = ::WindowFromPoint(screen);
+    HWND root = under ? ::GetAncestor(under, GA_ROOT) : nullptr;
+    for (HWND owner = root ? ::GetWindow(root, GW_OWNER) : nullptr; owner; owner = ::GetWindow(owner, GW_OWNER)) {
+      root = owner;  // a popup of a window (its URL bar, a panel) counts as that window
+    }
+    if (root != hwnd_) {
+      BrowserWindow* target = nullptr;
+      for (const auto& w : Application::Get()->windows()) {
+        if (w.get() != this && !w->closing() && w->hwnd() == root) target = w.get();
+      }
+      drag_from_ = drop_index_ = -1;
+      if (target) {
+        MoveTabToWindow(tab, target);
+      } else if (!IsGlanceTab(tab)) {
+        TearOffTab(tab, screen);
+      }
+      Layout();
+      return;
+    }
+    // Onto a linked window's row: into that window.
+    if (const auto children = LinkedChildren();
+        dropped_on_linked >= 0 && dropped_on_linked < static_cast<int>(children.size())) {
+      Workspace* linked = children[static_cast<size_t>(dropped_on_linked)];
+      drag_from_ = drop_index_ = -1;
+      FocusLinkedSpace(linked);
+      if (BrowserWindow* w = linked->window()) MoveTabToWindow(tab, w);
+      Layout();
+      return;
+    }
     // Dropping onto a group member joins that group; dropping anywhere else
     // (including just above a group header) leaves any group.
-    Tab* tab = workspace_->tabs()[static_cast<size_t>(drag_from_)].get();
     const auto rows = Rows();
     const int n_tabs = static_cast<int>(workspace_->tabs().size());
     int target = n_tabs;
     int64_t group = 0;
     if (drop_index_ >= 0 && drop_index_ < static_cast<int>(rows.size())) {
       const Row& at = rows[static_cast<size_t>(drop_index_)];
-      if (at.is_group) {
+      if (at.linked) {
+        // Before a linked row: the end of the tabs.
+      } else if (at.is_group) {
         for (int i = 0; i < n_tabs; ++i) {  // before the folder's first item
           if (workspace_->InGroup(workspace_->tabs()[static_cast<size_t>(i)].get(), at.group_id)) {
             target = i;
@@ -4937,8 +5457,7 @@ void BrowserWindow::EndSwipe() {
   const float strip = std::max(SidebarPanelWidth(), 1.f);
   const float progress = std::fabs(swipe_dx_) / strip;
   const uint64_t now = ::GetTickCount64();
-  const auto& spaces = profile_->workspaces();
-  const int count = static_cast<int>(spaces.size());
+  const int count = static_cast<int>(Spaces().size());
   if (progress >= kSwipeSuccess && count > 1) {
     swipe_handoff_ = std::min(progress, 0.9f);
     swipe_dx_ = 0.f;
@@ -4991,6 +5510,9 @@ void BrowserWindow::Click(const Hit& hit) {
     case HitKind::kCopyUrl:
       CopyCurrentUrl();
       break;
+    case HitKind::kExtensions:
+      ShowExtensionsMenu();
+      break;
     case HitKind::kMenu:
       ShowMainMenu(anchor(menu_));
       break;
@@ -5010,8 +5532,8 @@ void BrowserWindow::Click(const Hit& hit) {
     case HitKind::kWorkspace:
       if (collapsed_) {
         ShowWorkspaceMenu(-1, above(workspace_dots_.front()));
-      } else if (hit.index < static_cast<int>(profile_->workspaces().size())) {
-        SwitchWorkspace(profile_->workspaces()[static_cast<size_t>(hit.index)].get());
+      } else if (const auto spaces = Spaces(); hit.index < static_cast<int>(spaces.size())) {
+        SwitchWorkspace(spaces[static_cast<size_t>(hit.index)]);
       }
       break;
     case HitKind::kCreateNew:
@@ -5055,7 +5577,7 @@ void BrowserWindow::Click(const Hit& hit) {
       if (workspace_) CloseTabShortcut(workspace_->tabs()[static_cast<size_t>(hit.index)].get());
       break;
     case HitKind::kEssential:
-      if (Workspace* ess = profile_->essentials();
+      if (Workspace* ess = essentials();
           ess && hit.index < static_cast<int>(ess->tabs().size())) {
         ActivateTab(ess->tabs()[static_cast<size_t>(hit.index)].get());
       }
@@ -5076,10 +5598,19 @@ void BrowserWindow::Click(const Hit& hit) {
         LiveErrorAction(workspace_->groups()[static_cast<size_t>(hit.index)].id);
       }
       break;
+    case HitKind::kLinked:
+      if (const auto children = LinkedChildren(); hit.index >= 0 && hit.index < static_cast<int>(children.size())) {
+        FocusLinkedSpace(children[static_cast<size_t>(hit.index)]);
+      }
+      break;
+    case HitKind::kLinkedBack:
+      if (workspace_ && workspace_->is_linked()) Application::Get()->BringBackLinkedSpace(workspace_);
+      break;
     case HitKind::kCaptionMin:
     case HitKind::kCaptionMax:
     case HitKind::kCaptionClose:  // handled as non-client buttons
     case HitKind::kSidebarEdge:
+    case HitKind::kDevToolsEdge:
     case HitKind::kTabListEmpty:
     case HitKind::kNone:
       break;
@@ -5098,11 +5629,16 @@ void BrowserWindow::OnContextMenu(int screen_x, int screen_y, float x, float y) 
       ShowWorkspaceMenu(collapsed_ ? -1 : hit.index, pt);
       break;
     case HitKind::kEssential:
-      ShowEssentialMenu(profile_->essentials()->tabs()[static_cast<size_t>(hit.index)].get(), pt);
+      ShowEssentialMenu(essentials()->tabs()[static_cast<size_t>(hit.index)].get(), pt);
       break;
     case HitKind::kGroup:
     case HitKind::kLiveError:
       if (hit.index >= 0) ShowGroupMenu(workspace_->groups()[static_cast<size_t>(hit.index)].id, pt);
+      break;
+    case HitKind::kLinked:
+      if (const auto children = LinkedChildren(); hit.index >= 0 && hit.index < static_cast<int>(children.size())) {
+        ShowLinkedMenu(children[static_cast<size_t>(hit.index)], pt);
+      }
       break;
     default:
       if (InSidebar(x)) ShowWorkspaceMenu(-1, pt);
@@ -5118,20 +5654,21 @@ void BrowserWindow::ShowTabMenu(Tab* tab, POINT pt) {
   HMENU menu = ::CreatePopupMenu();
   HMENU ws_menu = ::CreatePopupMenu();
   HMENU win_menu = ::CreatePopupMenu();
-  const auto& workspaces = profile_->workspaces();
+  const std::vector<Workspace*> workspaces = Spaces();
   for (size_t i = 0; i < workspaces.size(); ++i) {
     UINT flags = MF_STRING;
-    if (workspaces[i].get() == workspace_) flags |= MF_GRAYED | MF_CHECKED;
-    ::AppendMenuW(ws_menu, flags, kCmdWorkspaceBase + i, workspaces[i]->record().name.c_str());
+    if (workspaces[i] == workspace_) flags |= MF_GRAYED | MF_CHECKED;
+    ::AppendMenuW(ws_menu, flags, kCmdWorkspaceBase + i, SpaceLabel(workspaces[i]).c_str());
   }
   const auto& windows = Application::Get()->windows();
   for (size_t i = 0; i < windows.size(); ++i) {
     BrowserWindow* w = windows[i].get();
-    if (w == this || w->profile_ != profile_ || w->closing_ || !w->workspace_) continue;
-    std::wstring label = L"Window: " + w->workspace_->record().name;
+    if (w == this || !CanShareTabs(w->profile_, profile_) || w->closing_ || !w->workspace_) continue;
+    std::wstring label = L"Window: " + SpaceLabel(w->workspace_);
     ::AppendMenuW(win_menu, MF_STRING, kCmdWindowBase + i, label.c_str());
   }
-  ::AppendMenuW(win_menu, MF_STRING, kCmdMoveToNewWindow, L"New window");
+  ::AppendMenuW(win_menu, MF_STRING | (profile_->is_private() || tab->empty_placeholder() ? MF_GRAYED : 0),
+                kCmdMoveToNewWindow, L"New window");
   HMENU group_menu = ::CreatePopupMenu();
   ::AppendMenuW(group_menu, MF_STRING, kCmdNewGroup, L"New folder…");
   const auto& groups = workspace_->groups();
@@ -5155,7 +5692,7 @@ void BrowserWindow::ShowTabMenu(Tab* tab, POINT pt) {
   ::AppendMenuW(menu, MF_STRING | (collapsed_ ? MF_GRAYED : 0), kCmdChangeLabel, L"Change Label\u2026");
   ::AppendMenuW(menu, MF_STRING, kCmdPin, tab->pinned() ? L"Unpin tab" : L"Pin tab");
   if (!tab->record().group_id) {
-    const Workspace* ess = profile_->essentials();
+    const Workspace* ess = essentials();
     const std::wstring label = L"Add to Essentials\t" +
                                std::to_wstring(ess ? ess->tabs().size() : 0) + L" / " +
                                std::to_wstring(kMaxEssentials);
@@ -5193,14 +5730,13 @@ void BrowserWindow::ShowTabMenu(Tab* tab, POINT pt) {
   ::AppendMenuW(menu, MF_STRING | (profile_->is_private() ? MF_GRAYED : 0), kCmdReopen,
                 MenuLabel(L"Reopen closed tab", L"reopen-tab").c_str());
 
-  const UINT cmd = static_cast<UINT>(::TrackPopupMenu(
-      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd_, nullptr));
+  const UINT cmd = static_cast<UINT>(ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, hwnd_, palette_));
   ::DestroyMenu(menu);  // destroys submenus too
   // |tab| may have been closed by Chromium while the menu was open.
   if (workspace_->IndexOf(tab) < 0) return;
 
   if (cmd >= kCmdWorkspaceBase && cmd < kCmdWorkspaceBase + workspaces.size()) {
-    MoveTabToWorkspace(tab, workspaces[cmd - kCmdWorkspaceBase].get());
+    MoveTabToWorkspace(tab, workspaces[cmd - kCmdWorkspaceBase]);
     return;
   }
   if (cmd >= kCmdWindowBase && cmd < kCmdWindowBase + windows.size()) {
@@ -5278,12 +5814,7 @@ void BrowserWindow::ShowTabMenu(Tab* tab, POINT pt) {
       tab->Unload(/*mark_discarded=*/true);
       break;
     case kCmdMoveToNewWindow:
-      if (!profile_->is_private()) {
-        Workspace* ws = Application::Get()->FreeWorkspaceFor(profile_);
-        if (BrowserWindow* w = Application::Get()->OpenWindow(profile_, ws, nullptr)) {
-          MoveTabToWindow(tab, w);
-        }
-      }
+      TearOffTab(tab);  // a linked window space
       break;
     case kCmdClose:
       CloseTab(tab);
@@ -5321,10 +5852,9 @@ void BrowserWindow::ShowEssentialMenu(Tab* tab, POINT pt) {
                 L"Put to sleep (unload)");
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   ::AppendMenuW(menu, MF_STRING, kCmdRemoveEssential, L"Remove from Essentials");
-  const UINT cmd = static_cast<UINT>(::TrackPopupMenu(
-      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd_, nullptr));
+  const UINT cmd = static_cast<UINT>(ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, hwnd_, palette_));
   ::DestroyMenu(menu);
-  if (!profile_->IsEssential(tab)) return;  // closed meanwhile
+  if (!IsEssential(tab)) return;  // closed meanwhile
   switch (cmd) {
     case kCmdReload:
       tab->Reload(false);
@@ -5342,7 +5872,7 @@ void BrowserWindow::ShowEssentialMenu(Tab* tab, POINT pt) {
       std::wstring text = tab->pinned_url();
       if (PromptText(L"Edit Essential URL", L"Enter the URL this essential tab should point to:",
                      text) &&
-          profile_->IsEssential(tab)) {
+          IsEssential(tab)) {
         SetPinnedUrlFromText(tab, text);
       }
       break;
@@ -5368,7 +5898,7 @@ void BrowserWindow::ShowEssentialMenu(Tab* tab, POINT pt) {
 
 std::vector<D2D1_RECT_F> BrowserWindow::EssentialRects() const {
   std::vector<D2D1_RECT_F> out;
-  const Workspace* ess = profile_->essentials();
+  const Workspace* ess = essentials();
   if (!ess || ess->tabs().empty() || !sidebar_visible()) return out;
   const int n = static_cast<int>(ess->tabs().size());
   const float sw = SidebarPanelWidth();
@@ -5391,7 +5921,10 @@ std::vector<D2D1_RECT_F> BrowserWindow::EssentialRects() const {
   int cols = std::max(1, static_cast<int>((aw + kGap) / (min_w + kGap)));
   cols = std::min(cols, n);  // auto-fit: empty tracks collapse, tiles stretch
   const float tile_w = (aw - kGap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
-  const float top = address_rect_.bottom + 6.f;
+  // Layout() seeds essentials_rect_.top with the sidebar's running y, which is
+  // right for both single and multiple toolbars (address_rect_ is in the
+  // toolbar in the latter).
+  const float top = essentials_rect_.top + 2.f;
   for (int i = 0; i < n; ++i) {
     const int row = i / cols;
     const int col = i % cols;
@@ -5403,15 +5936,15 @@ std::vector<D2D1_RECT_F> BrowserWindow::EssentialRects() const {
 }
 
 void BrowserWindow::ShowWorkspaceMenu(int index, POINT pt) {
-  const auto& workspaces = profile_->workspaces();
+  const std::vector<Workspace*> workspaces = Spaces();
   Workspace* target = (index >= 0 && index < static_cast<int>(workspaces.size()))
-                          ? workspaces[static_cast<size_t>(index)].get()
+                          ? workspaces[static_cast<size_t>(index)]
                           : workspace_;
   if (!target) return;
   HMENU menu = ::CreatePopupMenu();
   for (size_t i = 0; i < workspaces.size(); ++i) {
-    UINT flags = MF_STRING | (workspaces[i].get() == workspace_ ? MF_CHECKED : 0);
-    std::wstring label = workspaces[i]->record().name;
+    UINT flags = MF_STRING | (workspaces[i] == workspace_ ? MF_CHECKED : 0);
+    std::wstring label = SpaceLabel(workspaces[i]);
     if (workspaces[i]->window() && workspaces[i]->window() != this) label += L"  (other window)";
     ::AppendMenuW(menu, flags, kCmdWorkspaceBase + i, label.c_str());
   }
@@ -5420,6 +5953,18 @@ void BrowserWindow::ShowWorkspaceMenu(int index, POINT pt) {
   ::AppendMenuW(menu, MF_STRING | disabled, kCmdRename, L"Change Name\u2026");
   ::AppendMenuW(menu, MF_STRING | disabled, kCmdChangeIcon, L"Change Icon\u2026");
   ::AppendMenuW(menu, MF_STRING | disabled, kCmdEditTheme, L"Edit Theme\u2026");
+  // Zen's container picker in the space editor: the profile (storage) the
+  // space's tabs use.
+  const auto& profiles = Application::Get()->profiles();
+  HMENU profile_menu = ::CreatePopupMenu();
+  for (size_t i = 0; i < profiles.size(); ++i) {
+    const UINT checked = profiles[i].get() == target->profile() ? MF_CHECKED : 0;
+    ::AppendMenuW(profile_menu, MF_STRING | checked, kCmdSpaceProfileBase + i, profiles[i]->record().name.c_str());
+  }
+  ::AppendMenuW(profile_menu, MF_SEPARATOR, 0, nullptr);
+  ::AppendMenuW(profile_menu, MF_STRING, kCmdSpaceNewProfile, L"New profile\u2026");
+  ::AppendMenuW(menu, MF_POPUP | (disabled || target->is_linked() ? MF_GRAYED : 0),
+                reinterpret_cast<UINT_PTR>(profile_menu), L"Profile");
   // #zenWorkspaceMoreActions: Manage Spaces…, Unload Space, Unload All Other
   // Spaces | Create Space, Delete Space | Space Routing Settings (Orbit adds
   // Move Earlier / Later).
@@ -5429,17 +5974,33 @@ void BrowserWindow::ShowWorkspaceMenu(int index, POINT pt) {
   ::AppendMenuW(menu, MF_STRING, kCmdUnloadOtherSpaces, L"Unload All Other Spaces");
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   ::AppendMenuW(menu, MF_STRING | disabled, kCmdNewWorkspace, L"Create Space");
-  ::AppendMenuW(menu, MF_STRING | disabled, kCmdMoveUp, L"Move Earlier");
-  ::AppendMenuW(menu, MF_STRING | disabled, kCmdMoveDown, L"Move Later");
-  ::AppendMenuW(menu, MF_STRING | disabled, kCmdDelete, L"Delete Space");
+  const UINT not_linked = target->is_linked() ? MF_GRAYED : 0;
+  ::AppendMenuW(menu, MF_STRING | disabled | not_linked, kCmdMoveUp, L"Move Earlier");
+  ::AppendMenuW(menu, MF_STRING | disabled | not_linked, kCmdMoveDown, L"Move Later");
+  ::AppendMenuW(menu, MF_STRING | disabled | not_linked, kCmdDelete, L"Delete Space");
+  if (target->is_linked() && target->parent()) {
+    ::AppendMenuW(menu, MF_STRING, kCmdLinkedBringBack, L"Bring Tabs Back");
+  }
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   ::AppendMenuW(menu, MF_STRING | disabled, kCmdSpaceRouting, L"Space Routing Settings");
 
-  const UINT cmd = static_cast<UINT>(::TrackPopupMenu(
-      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd_, nullptr));
+  const UINT cmd = static_cast<UINT>(ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, hwnd_, palette_));
   ::DestroyMenu(menu);
   if (cmd >= kCmdWorkspaceBase && cmd < kCmdWorkspaceBase + workspaces.size()) {
-    SwitchWorkspace(workspaces[cmd - kCmdWorkspaceBase].get());
+    SwitchWorkspace(workspaces[cmd - kCmdWorkspaceBase]);
+    return;
+  }
+  if (cmd >= kCmdSpaceProfileBase && cmd < kCmdSpaceProfileBase + profiles.size()) {
+    MoveSpaceToProfile(target, profiles[cmd - kCmdSpaceProfileBase].get());
+    return;
+  }
+  if (cmd == kCmdSpaceNewProfile) {
+    std::wstring name = L"Profile " + std::to_wstring(profiles.size() + 1);
+    if (!PromptText(L"New profile", L"Profile name:", name) || name.empty()) return;
+    const uint32_t color = ui::kAccentChoices[profiles.size() % std::size(ui::kAccentChoices)];
+    if (Profile* p = Application::Get()->CreateProfile(name, color, /*with_space=*/false)) {
+      MoveSpaceToProfile(target, p);
+    }
     return;
   }
   if (cmd >= kCmdColorBase && cmd < kCmdColorBase + std::size(ui::kAccentChoices)) {
@@ -5451,7 +6012,7 @@ void BrowserWindow::ShowWorkspaceMenu(int index, POINT pt) {
   }
   const int pos = [&] {
     for (size_t i = 0; i < workspaces.size(); ++i) {
-      if (workspaces[i].get() == target) return static_cast<int>(i);
+      if (workspaces[i] == target) return static_cast<int>(i);
     }
     return 0;
   }();
@@ -5493,15 +6054,18 @@ void BrowserWindow::ShowWorkspaceMenu(int index, POINT pt) {
       UnloadOtherWorkspaces(target);
       break;
     case kCmdMoveUp:
-      profile_->MoveWorkspace(target, pos - 1);
+      Application::Get()->MoveSpace(target, pos - 1);
       Layout();
       break;
     case kCmdMoveDown:
-      profile_->MoveWorkspace(target, pos + 1);
+      Application::Get()->MoveSpace(target, pos + 1);
       Layout();
       break;
     case kCmdDelete:
-      DeleteWorkspace(target);
+      if (!target->is_linked()) DeleteWorkspace(target);
+      break;
+    case kCmdLinkedBringBack:
+      if (target->is_linked()) Application::Get()->BringBackLinkedSpace(target);
       break;
     default:
       break;
@@ -5555,10 +6119,10 @@ void BrowserWindow::ShowGroupMenu(int64_t group_id, POINT pt) {
   ::AppendMenuW(menu, MF_STRING | (can_nest ? 0 : MF_GRAYED), kCmdSubfolder, L"New Subfolder\u2026");
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   HMENU spaces = ::CreatePopupMenu();
-  const auto& workspaces = profile_->workspaces();
+  const std::vector<Workspace*> workspaces = Spaces();
   for (size_t i = 0; i < workspaces.size(); ++i) {
-    const UINT flags = MF_STRING | (workspaces[i].get() == workspace_ ? MF_GRAYED | MF_CHECKED : 0);
-    ::AppendMenuW(spaces, flags, kCmdFolderSpaceBase + i, workspaces[i]->record().name.c_str());
+    const UINT flags = MF_STRING | (workspaces[i] == workspace_ ? MF_GRAYED | MF_CHECKED : 0);
+    ::AppendMenuW(spaces, flags, kCmdFolderSpaceBase + i, SpaceLabel(workspaces[i]).c_str());
   }
   // A live folder stays where it is (its items are tied to this folder).
   const UINT disabled = profile_->is_private() || live ? MF_GRAYED : 0;
@@ -5575,8 +6139,7 @@ void BrowserWindow::ShowGroupMenu(int64_t group_id, POINT pt) {
     ::AppendMenuW(colors, MF_STRING | checked, kCmdColorBase + i, kColorNames[i]);
   }
   ::AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(colors), L"Color");
-  const UINT cmd = static_cast<UINT>(::TrackPopupMenu(
-      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd_, nullptr));
+  const UINT cmd = static_cast<UINT>(ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, hwnd_, palette_));
   ::DestroyMenu(menu);
   g = workspace_->FindGroup(group_id);  // may be gone if its tabs closed meanwhile
   if (!g) return;
@@ -5587,7 +6150,7 @@ void BrowserWindow::ShowGroupMenu(int64_t group_id, POINT pt) {
     updated.color = ui::kAccentChoices[cmd - kCmdColorBase];
     workspace_->UpdateGroup(updated);
   } else if (cmd >= kCmdFolderSpaceBase && cmd < kCmdFolderSpaceBase + workspaces.size()) {
-    MoveFolderToSpace(group_id, workspaces[cmd - kCmdFolderSpaceBase].get());
+    MoveFolderToSpace(group_id, workspaces[cmd - kCmdFolderSpaceBase]);
   } else if (cmd == kCmdToggleGroup) {
     ToggleGroup(group_id);
   } else if (cmd == kCmdRenameGroup) {
@@ -5935,8 +6498,11 @@ void BrowserWindow::UnloadFolder(int64_t group_id) {
 }
 
 void BrowserWindow::MoveFolderToSpace(int64_t group_id, Workspace* target) {
-  // context_zenChangeFolderSpace: the folder (and its subfolders) moves.
-  if (!target || target == workspace_ || target->profile() != profile_) return;
+  // context_zenChangeFolderSpace: the folder (and its subfolders) moves (to a
+  // space of another profile too: its tabs load again there).
+  if (!target || target == workspace_ || target->is_linked() || !CanShareTabs(profile_, target->profile())) {
+    return;
+  }
   const TabGroupRecord* root = workspace_->FindGroup(group_id);
   if (!root) return;
   // Recreate the folder tree in the target space, outermost first.
@@ -6060,8 +6626,7 @@ void BrowserWindow::ShowProfileMenu(POINT pt) {
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   ::AppendMenuW(menu, MF_STRING, kCmdNewPrivateWindow, MenuLabel(L"New private window", L"private-window").c_str());
 
-  const UINT cmd = static_cast<UINT>(::TrackPopupMenu(
-      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd_, nullptr));
+  const UINT cmd = static_cast<UINT>(ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, hwnd_, palette_));
   ::DestroyMenu(menu);
   if (cmd >= kCmdProfileBase && cmd < kCmdProfileBase + profiles.size()) {
     Profile* target = profiles[cmd - kCmdProfileBase].get();
@@ -6095,11 +6660,11 @@ void BrowserWindow::ShowProfileMenu(POINT pt) {
     case kCmdDeleteProfile: {
       const std::wstring msg =
           L"Delete profile \"" + profile_->record().name +
-          L"\"?\n\nAll of its windows will close, and its cookies, site data, history, "
-          L"bookmarks and workspaces will be permanently deleted.";
+          L"\"?\n\nIts spaces and their tabs, and its cookies, site data, history and "
+          L"bookmarks will be permanently deleted.";
       if (::MessageBoxW(hwnd_, msg.c_str(), L"Delete profile", MB_OKCANCEL | MB_ICONWARNING) ==
           IDOK) {
-        app->DeleteProfile(profile_);  // closes this window
+        app->DeleteProfile(profile_);  // this window moves to a space of another profile
       }
       break;
     }
@@ -6121,6 +6686,9 @@ void BrowserWindow::ShowMainMenu(POINT pt) {
   ::AppendMenuW(menu, MF_STRING, kCmdBookmarks, MenuLabel(L"Bookmarks", L"bookmarks").c_str());
   ::AppendMenuW(menu, MF_STRING, kCmdHistory, MenuLabel(L"History", L"history").c_str());
   ::AppendMenuW(menu, MF_STRING, kCmdDownloads, MenuLabel(L"Downloads", L"downloads").c_str());
+  if (!profile_->is_private()) {
+    ::AppendMenuW(menu, MF_STRING, kCmdExtensions, MenuLabel(L"Extensions", L"extensions").c_str());
+  }
   std::wstring profiles = L"Profile: " + profile_->record().name + L"…";
   ::AppendMenuW(menu, MF_STRING, kCmdProfiles, profiles.c_str());
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -6152,8 +6720,7 @@ void BrowserWindow::ShowMainMenu(POINT pt) {
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   ::AppendMenuW(menu, MF_STRING, kCmdExit, L"Exit");
 
-  const UINT cmd = static_cast<UINT>(::TrackPopupMenu(
-      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd_, nullptr));
+  const UINT cmd = static_cast<UINT>(ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, hwnd_, palette_));
   ::DestroyMenu(menu);
   tab = active_tab();
   switch (cmd) {
@@ -6174,6 +6741,9 @@ void BrowserWindow::ShowMainMenu(POINT pt) {
       break;
     case kCmdDownloads:
       OpenInternalPage(kPageDownloads);
+      break;
+    case kCmdExtensions:
+      OpenInternalPage(kPageExtensions);
       break;
     case kCmdSettings:
       OpenInternalPage(kPageSettings);
@@ -6237,9 +6807,7 @@ void BrowserWindow::ShowCreateMenu(POINT pt) {
                 kCmdNewSplit, L"New Split");
   ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   ::AppendMenuW(menu, MF_STRING, kCmdNewTab, L"New Tab\tCtrl+T");
-  const UINT cmd = static_cast<UINT>(::TrackPopupMenu(
-      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN, pt.x, pt.y, 0,
-      hwnd_, nullptr));
+  const UINT cmd = static_cast<UINT>(ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN, pt.x, pt.y, hwnd_, palette_));
   ::DestroyMenu(menu);
   switch (cmd) {
     case kCmdNewTab:
@@ -6285,6 +6853,7 @@ void BrowserWindow::UpdateTooltip(const Hit& hit) {
     case HitKind::kSiteInfo: r = site_info_; break;
     case HitKind::kStar: r = star_; break;
     case HitKind::kCopyUrl: r = copy_url_; break;
+    case HitKind::kExtensions: r = ext_btn_; break;
     case HitKind::kMenu: r = menu_; break;
     case HitKind::kSidebarToggle: r = toggle_; break;
     case HitKind::kWorkspaceIndicator: r = ws_indicator_; break;
@@ -6318,6 +6887,13 @@ void BrowserWindow::UpdateTooltip(const Hit& hit) {
       }
       break;
     }
+    case HitKind::kLinked: {
+      for (const Row& row : Rows()) {
+        if (row.linked && LinkedIndex(row.linked) == hit.index) r = RowRect(row);
+      }
+      break;
+    }
+    case HitKind::kLinkedBack: r = linked_back_; break;
     default: break;
   }
   TTTOOLINFOW ti{sizeof(ti)};
@@ -6338,6 +6914,7 @@ std::wstring BrowserWindow::TooltipText() const {
     case HitKind::kSiteInfo: return L"View site information";
     case HitKind::kStar: return bookmarked_ ? L"Remove bookmark (Ctrl+D)" : L"Bookmark this page (Ctrl+D)";
     case HitKind::kCopyUrl: return L"Copy URL (Ctrl+Shift+C)";
+    case HitKind::kExtensions: return L"Extensions";
     case HitKind::kMenu: return L"Menu";
     case HitKind::kSidebarToggle:
       return compact_mode_ ? L"Turn off compact mode (Ctrl+S)"
@@ -6351,9 +6928,9 @@ std::wstring BrowserWindow::TooltipText() const {
       return workspace_ ? L"Space: " + workspace_->record().name : L"";
     case HitKind::kWorkspace: {
       if (collapsed_) return workspace_ ? L"Space: " + workspace_->record().name : L"";
-      const auto& ws = profile_->workspaces();
+      const auto ws = Spaces();
       const size_t i = static_cast<size_t>(tooltip_hit_.index);
-      return i < ws.size() ? ws[i]->record().name : L"";
+      return i < ws.size() ? SpaceLabel(ws[i]) : L"";
     }
     case HitKind::kCreateNew: return L"Create New";
     case HitKind::kDownloads: {
@@ -6386,7 +6963,7 @@ std::wstring BrowserWindow::TooltipText() const {
       return L"Close tab (Ctrl+W)";
     }
     case HitKind::kEssential: {
-      const Workspace* ess = profile_->essentials();
+      const Workspace* ess = essentials();
       const size_t i = static_cast<size_t>(tooltip_hit_.index);
       return ess && i < ess->tabs().size() ? ess->tabs()[i]->DisplayTitle() : L"";
     }
@@ -6399,6 +6976,19 @@ std::wstring BrowserWindow::TooltipText() const {
           workspace_->groups()[static_cast<size_t>(tooltip_hit_.index)].id);
       return e ? LiveErrorTooltip(e->state.last_error) : L"";
     }
+    case HitKind::kLinked: {
+      const auto children = LinkedChildren();
+      const size_t i = static_cast<size_t>(tooltip_hit_.index);
+      if (i >= children.size()) return L"";
+      int n = 0;
+      for (const auto& t : children[i]->tabs()) n += !t->empty_placeholder();
+      return children[i]->record().name + L" \u2014 " + std::to_wstring(n) +
+             L" tab(s) in a linked window. Click to show it.";
+    }
+    case HitKind::kLinkedBack:
+      return workspace_ && workspace_->parent()
+                 ? L"Bring the tabs back to " + workspace_->parent()->record().name + L" and close this window"
+                 : L"";
     case HitKind::kGroup: {
       if (!workspace_ || tooltip_hit_.index < 0) return L"";
       const auto& g = workspace_->groups()[static_cast<size_t>(tooltip_hit_.index)];
@@ -6479,7 +7069,7 @@ void BrowserWindow::PinnedCloseShortcut(Tab* tab, bool close_if_unloaded) {
   // ZenPinnedTabManager.onCloseTabShortcut with
   // zen.pinned-tab-manager.close-shortcut-behavior (default reset-unload-switch).
   if (!tab || !tab->pinned() ||
-      (workspace_->IndexOf(tab) < 0 && !profile_->IsEssential(tab))) {
+      (workspace_->IndexOf(tab) < 0 && !IsEssential(tab))) {
     return;
   }
   std::wstring behavior = L"reset-unload-switch";
@@ -6708,10 +7298,10 @@ int BrowserWindow::UnloadWorkspaceTabs(Workspace* ws) {
 
 int BrowserWindow::UnloadOtherWorkspaces(Workspace* keep) {
   int count = 0;
-  for (const auto& ws : profile_->workspaces()) {
-    if (ws.get() == keep) continue;
+  for (Workspace* ws : Spaces()) {
+    if (ws == keep) continue;
     if (ws->window() && ws->window() != this) continue;  // on screen in another window
-    count += UnloadWorkspaceTabs(ws.get());
+    count += UnloadWorkspaceTabs(ws);
   }
   return count;
 }
@@ -6730,6 +7320,56 @@ void BrowserWindow::ShowToast(ui::Toast::Content content) {
   if (palette_.dark) style.primary = ui::Mix(style.primary, ui::ColorFromRgb(0x000000), 0.75f);
   style.dark = palette_.dark;
   toast_->Show(content, style);
+}
+
+bool BrowserWindow::ExtensionsButtonShown() const {
+  if (profile_->is_private() || chrome_hidden()) return false;
+  const ExtensionBridge* bridge = Application::Get()->FindExtensions(profile_);
+  if (!bridge) return false;
+  for (const ExtensionInfo& e : bridge->extensions()) {
+    if (e.enabled) return true;
+  }
+  return false;
+}
+
+void BrowserWindow::OnExtensionsChanged() {
+  Layout();
+  Invalidate();
+}
+
+// The extensions button: Orbit's own menu of the extensions that have an
+// action popup, the Extensions page, and the Web Store.
+void BrowserWindow::ShowExtensionsMenu() {
+  Application* app = Application::Get();
+  const ExtensionBridge* bridge = app->FindExtensions(profile_);
+  if (!bridge) return;
+  constexpr UINT kFirst = 100, kManage = 90, kStore = 91;
+  HMENU menu = ::CreatePopupMenu();
+  std::vector<const ExtensionInfo*> shown;
+  for (const ExtensionInfo& e : bridge->extensions()) {
+    if (!e.enabled || e.popup.empty()) continue;
+    shown.push_back(&e);
+    ::AppendMenuW(menu, MF_STRING, kFirst + static_cast<UINT>(shown.size() - 1), FromUtf8(e.name).c_str());
+  }
+  if (!shown.empty()) ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  ::AppendMenuW(menu, MF_STRING, kManage, L"Manage extensions");
+  ::AppendMenuW(menu, MF_STRING, kStore, L"Get extensions");
+  POINT at{static_cast<LONG>(px(ext_btn_.left)), static_cast<LONG>(px(ext_btn_.bottom + 2))};
+  ::ClientToScreen(hwnd_, &at);
+  const UINT cmd = static_cast<UINT>(
+      ui::TrackMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, at.x, at.y, hwnd_, palette_));
+  ::DestroyMenu(menu);
+  if (cmd == kManage) {
+    OpenInternalPage(kPageExtensions);
+  } else if (cmd == kStore) {
+    OpenTab(L"https://chromewebstore.google.com/category/extensions", true);
+  } else if (cmd >= kFirst && cmd - kFirst < shown.size()) {
+    // The popup opens under the button.
+    POINT below{static_cast<LONG>(px(ext_btn_.left)), static_cast<LONG>(px(ext_btn_.bottom + 6))};
+    ::ClientToScreen(hwnd_, &below);
+    ExtensionInfo chosen = *shown[cmd - kFirst];
+    ExtensionPopup::Open(this, chosen, below);
+  }
 }
 
 bool BrowserWindow::CanCopyUrlFromButton() const {
@@ -6753,7 +7393,9 @@ bool BrowserWindow::CopyCurrentUrl(bool markdown) {
   url = StripTrackingParams(url);  // zenStrippedURI (stripForCopyOrShare)
   const std::wstring plain = url;
   if (markdown) url = L"[" + tab->DisplayTitle() + L"](" + url + L")";
-  if (!::OpenClipboard(hwnd_)) {
+  bool open = false;  // another application may hold the clipboard for a moment
+  for (int attempt = 0; attempt < 20 && !(open = ::OpenClipboard(hwnd_)); ++attempt) ::Sleep(10);
+  if (!open) {
     ORBIT_LOG_WARNING("copy URL: clipboard is busy");
     return false;
   }
@@ -6868,12 +7510,19 @@ std::vector<AccessibleItem> BrowserWindow::AccessibleItems() const {
   add(HitKind::kStar, 0, Role::kButton, bookmarked_ ? L"Remove bookmark" : L"Bookmark this page",
       star_);
   if (CanCopyUrlFromButton()) add(HitKind::kCopyUrl, 0, Role::kButton, L"Copy URL", copy_url_);
+  if (ext_btn_.right > ext_btn_.left) add(HitKind::kExtensions, 0, Role::kButton, L"Extensions", ext_btn_);
   if (workspace_) {
-    add(HitKind::kWorkspaceIndicator, 0, Role::kButton, L"Space: " + workspace_->record().name,
+    const bool linked = workspace_->is_linked() && workspace_->parent();
+    add(HitKind::kWorkspaceIndicator, 0, Role::kButton,
+        linked ? L"Linked to " + workspace_->parent()->record().name : L"Space: " + workspace_->record().name,
         ws_indicator_);
     if (workspace_->PinnedCount() > 0) items.back().expanded = !PinnedSectionCollapsed();
+    if (linked) {
+      add(HitKind::kLinkedBack, 0, Role::kButton,
+          L"Bring tabs back to " + workspace_->parent()->record().name, linked_back_);
+    }
   }
-  if (const Workspace* ess = profile_->essentials()) {
+  if (const Workspace* ess = essentials()) {
     const auto rects = EssentialRects();
     for (size_t i = 0; i < rects.size() && i < ess->tabs().size(); ++i) {
       Tab* t = ess->tabs()[i].get();
@@ -6905,6 +7554,16 @@ std::vector<AccessibleItem> BrowserWindow::AccessibleItems() const {
         add(HitKind::kLiveError, static_cast<intptr_t>(row.group_id), Role::kButton,
             LiveErrorTooltip(live->state.last_error), err);
       }
+    } else if (row.linked) {
+      const auto children = LinkedChildren();
+      const int k = LinkedIndex(row.linked);
+      if (k < 0) continue;
+      Workspace* ls = children[static_cast<size_t>(k)];
+      int n = 0;
+      for (const auto& t : ls->tabs()) n += !t->empty_placeholder();
+      add(HitKind::kLinked, reinterpret_cast<intptr_t>(ls), Role::kButton,
+          L"Linked window " + ls->record().name + L", " + std::to_wstring(n) + (n == 1 ? L" tab" : L" tabs"),
+          rect);
     } else if (row.split) {
       const int n = SplitMemberCount(row);
       for (int k = 0; k < n; ++k) {
@@ -6931,13 +7590,13 @@ std::vector<AccessibleItem> BrowserWindow::AccessibleItems() const {
   }
   // Footer.
   add(HitKind::kDownloads, 0, Role::kButton, L"Library", downloads_);
-  const auto& workspaces = profile_->workspaces();
+  const std::vector<Workspace*> workspaces = Spaces();
   for (size_t i = 0; i < workspace_dots_.size(); ++i) {
     const size_t w = static_cast<size_t>(first_dot_workspace_) + i;
     if (w >= workspaces.size()) break;
-    Workspace* ws = workspaces[w].get();
+    Workspace* ws = workspaces[w];
     add(HitKind::kWorkspace, reinterpret_cast<intptr_t>(ws), Role::kButton,
-        L"Space: " + ws->record().name, workspace_dots_[i]);
+        L"Space: " + SpaceLabel(ws), workspace_dots_[i]);
     items.back().selected = ws == workspace_;
   }
   add(HitKind::kCreateNew, 0, Role::kButton, L"Create new", create_new_);
@@ -6962,15 +7621,23 @@ void BrowserWindow::HandleAccessibleInvoke(int kind, intptr_t key) {
       hit.index = GroupIndex(static_cast<int64_t>(key));
       break;
     case HitKind::kEssential:
-      hit.index = profile_->essentials()
-                      ? profile_->essentials()->IndexOf(reinterpret_cast<Tab*>(key))
+      hit.index = essentials()
+                      ? essentials()->IndexOf(reinterpret_cast<Tab*>(key))
                       : -1;
       break;
+    case HitKind::kLinked: {
+      hit.index = -1;
+      const auto children = LinkedChildren();
+      for (size_t i = 0; i < children.size(); ++i) {
+        if (reinterpret_cast<intptr_t>(children[i]) == key) hit.index = static_cast<int>(i);
+      }
+      break;
+    }
     case HitKind::kWorkspace: {
       hit.index = -1;
-      const auto& ws = profile_->workspaces();
+      const auto ws = Spaces();
       for (size_t i = 0; i < ws.size(); ++i) {
-        if (reinterpret_cast<intptr_t>(ws[i].get()) == key) hit.index = static_cast<int>(i);
+        if (reinterpret_cast<intptr_t>(ws[i]) == key) hit.index = static_cast<int>(i);
       }
       break;
     }
@@ -6987,7 +7654,7 @@ void BrowserWindow::AccessibleFocus(int kind, intptr_t key) {
     const bool match =
         (kind == static_cast<int>(HitKind::kGroup) && rows[r].is_group &&
          rows[r].group_id == static_cast<int64_t>(key)) ||
-        (kind == static_cast<int>(HitKind::kTab) && !rows[r].is_group &&
+        (kind == static_cast<int>(HitKind::kTab) && !rows[r].is_group && rows[r].tab >= 0 &&
          reinterpret_cast<intptr_t>(workspace_->tabs()[static_cast<size_t>(rows[r].tab)].get()) ==
              key);
     if (match) {
@@ -7018,7 +7685,8 @@ void BrowserWindow::OpenNormalWindow() {
 
 void BrowserWindow::OpenInternalPage(int page) {
   static constexpr const wchar_t* kPages[] = {L"orbit://downloads/", L"orbit://bookmarks/",
-                                              L"orbit://history/", L"orbit://settings/"};
+                                              L"orbit://history/", L"orbit://settings/",
+                                              L"orbit://extensions/"};
   const std::wstring url = kPages[page];
   // Reuse an existing tab showing the page instead of piling up duplicates.
   for (const auto& t : workspace_->tabs()) {

@@ -132,7 +132,14 @@ class InternalSchemeFactory : public CefSchemeHandlerFactory {
     };
     const CefString frame_url = frame ? frame->GetURL() : CefString();
     const bool has_header = request->GetHeaderByName("X-Orbit-Request") == "1";
-    r.same_page = frame && has_header && (frame_url.empty() || is_same_page(frame_url));
+    // The frame URL can still be the page navigated away from (Chrome style
+    // updates it later; the referrer is not available for this scheme). The
+    // header above is the boundary, so a stale frame URL that is itself an
+    // internal page is accepted: another host's page cannot attach the header
+    // cross-origin either, and a web page's request is stopped by the renderer.
+    const bool stale_internal = !frame_url.empty() &&
+                                ToLowerAscii(frame_url.ToWString()).starts_with(L"orbit://");
+    r.same_page = frame && has_header && (frame_url.empty() || is_same_page(frame_url) || stale_internal);
     if (!r.same_page && r.path.starts_with(L"/api/")) {
       // Logs internal hosts only, never web URLs (privacy rule in core/log.h).
       auto describe = [](const CefString& url) -> std::wstring {

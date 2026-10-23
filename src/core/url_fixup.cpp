@@ -127,8 +127,9 @@ HostKind ClassifyHost(std::wstring_view input) {
 }  // namespace
 
 bool IsAllowedTypedScheme(std::wstring_view scheme_lower) {
-  static constexpr std::array<std::wstring_view, 8> kAllowed = {
-      L"http", L"https", L"file", L"about", L"orbit", L"data", L"view-source", L"chrome"};
+  static constexpr std::array<std::wstring_view, 9> kAllowed = {
+      L"http", L"https", L"file", L"about", L"orbit", L"data", L"view-source", L"chrome",
+      L"chrome-extension"};
   for (auto s : kAllowed) {
     if (s == scheme_lower) return true;
   }

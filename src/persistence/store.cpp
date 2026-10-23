@@ -93,8 +93,8 @@ bool Store::DeleteProfile(int64_t id) {
 std::vector<WorkspaceRecord> Store::LoadWorkspaces(int64_t profile_id) {
   std::vector<WorkspaceRecord> out;
   auto s = db_.Prepare(
-      "SELECT id, profile_id, name, color, icon, position, kind, theme FROM workspaces "
-      "WHERE profile_id = ? ORDER BY position, id");
+      "SELECT id, profile_id, name, color, icon, position, kind, theme, COALESCE(owner_id, 0), "
+      "COALESCE(parent_id, 0) FROM workspaces WHERE profile_id = ? ORDER BY position, id");
   s.Bind(1, profile_id);
   while (s.Step()) {
     WorkspaceRecord w;
@@ -106,6 +106,8 @@ std::vector<WorkspaceRecord> Store::LoadWorkspaces(int64_t profile_id) {
     w.position = s.ColumnInt(5);
     w.kind = s.ColumnInt(6);
     w.theme = s.ColumnText(7);
+    w.owner_id = s.ColumnInt64(8);
+    w.parent_id = s.ColumnInt64(9);
     out.push_back(std::move(w));
   }
   return out;
@@ -114,24 +116,51 @@ std::vector<WorkspaceRecord> Store::LoadWorkspaces(int64_t profile_id) {
 std::optional<WorkspaceRecord> Store::CreateWorkspace(int64_t profile_id,
                                                       const std::wstring& name, uint32_t color,
                                                       const std::wstring& icon, int kind) {
+  WorkspaceRecord w;
+  w.profile_id = profile_id;
+  w.name = name;
+  w.color = color;
+  w.icon = icon;
+  w.kind = kind;
+  return CreateWorkspace(w);
+}
+
+namespace {
+void BindWorkspaceLink(Database::Statement& s, int index, int64_t id) {
+  if (id) {
+    s.Bind(index, id);
+  } else {
+    s.BindNull(index);
+  }
+}
+}  // namespace
+
+std::optional<WorkspaceRecord> Store::CreateWorkspace(const WorkspaceRecord& w) {
   auto s = db_.Prepare(
-      "INSERT INTO workspaces (profile_id, name, color, icon, position, kind) VALUES (?, ?, ?, ?, "
-      "(SELECT COALESCE(MAX(position) + 1, 0) FROM workspaces WHERE profile_id = ?), ?)");
-  s.Bind(1, profile_id).Bind(2, name).Bind(3, static_cast<int64_t>(color)).Bind(4, icon);
-  s.Bind(5, profile_id).Bind(6, kind);
+      "INSERT INTO workspaces (profile_id, name, color, icon, position, kind, theme, owner_id, "
+      "parent_id) VALUES (?, ?, ?, ?, CASE WHEN ? = 0 THEN (SELECT COALESCE(MAX(position) + 1, 0) "
+      "FROM workspaces WHERE kind = 0) ELSE 0 END, ?, ?, ?, ?)");
+  s.Bind(1, w.profile_id).Bind(2, w.name).Bind(3, static_cast<int64_t>(w.color)).Bind(4, w.icon);
+  s.Bind(5, w.kind).Bind(6, w.kind).Bind(7, w.theme);
+  BindWorkspaceLink(s, 8, w.owner_id);
+  BindWorkspaceLink(s, 9, w.parent_id);
   if (!s.Run()) return std::nullopt;
   const int64_t id = db_.LastInsertId();
-  for (auto& w : LoadWorkspaces(profile_id)) {
-    if (w.id == id) return w;
+  for (auto& stored : LoadWorkspaces(w.profile_id)) {
+    if (stored.id == id) return stored;
   }
   return std::nullopt;
 }
 
 bool Store::UpdateWorkspace(const WorkspaceRecord& w) {
   auto s = db_.Prepare(
-      "UPDATE workspaces SET name = ?, color = ?, icon = ?, position = ?, theme = ? WHERE id = ?");
-  s.Bind(1, w.name).Bind(2, static_cast<int64_t>(w.color)).Bind(3, w.icon);
-  s.Bind(4, w.position).Bind(5, w.theme).Bind(6, w.id);
+      "UPDATE workspaces SET profile_id = ?, name = ?, color = ?, icon = ?, theme = ?, kind = ?, "
+      "owner_id = ?, parent_id = ? WHERE id = ?");
+  s.Bind(1, w.profile_id).Bind(2, w.name).Bind(3, static_cast<int64_t>(w.color)).Bind(4, w.icon);
+  s.Bind(5, w.theme).Bind(6, w.kind);
+  BindWorkspaceLink(s, 7, w.owner_id);
+  BindWorkspaceLink(s, 8, w.parent_id);
+  s.Bind(9, w.id);
   return s.Run();
 }
 
@@ -403,7 +432,7 @@ std::vector<WindowRecord> Store::LoadWindows() {
   std::vector<WindowRecord> out;
   auto s = db_.Prepare(
       "SELECT id, profile_id, COALESCE(workspace_id, 0), COALESCE(active_tab_id, 0), x, y, "
-      "w, h, maximized FROM windows ORDER BY position, id");
+      "w, h, maximized, linked_id FROM windows ORDER BY position, id");
   while (s.Step()) {
     WindowRecord w;
     w.id = s.ColumnInt64(0);
@@ -415,6 +444,7 @@ std::vector<WindowRecord> Store::LoadWindows() {
     w.w = s.ColumnInt(6);
     w.h = s.ColumnInt(7);
     w.maximized = s.ColumnBool(8);
+    w.linked_id = s.ColumnInt64(9);
     out.push_back(w);
   }
   return out;
@@ -425,7 +455,7 @@ bool Store::SaveWindows(const std::vector<WindowRecord>& windows) {
   if (!db_.Execute("DELETE FROM windows")) return false;
   auto s = db_.Prepare(
       "INSERT INTO windows (profile_id, workspace_id, active_tab_id, x, y, w, h, maximized, "
-      "position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      "position, linked_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   for (size_t i = 0; i < windows.size(); ++i) {
     const auto& w = windows[i];
     s.Reset();
@@ -436,7 +466,7 @@ bool Store::SaveWindows(const std::vector<WindowRecord>& windows) {
       s.BindNull(2);
     }
     s.Bind(3, w.active_tab_id).Bind(4, w.x).Bind(5, w.y).Bind(6, w.w).Bind(7, w.h);
-    s.Bind(8, w.maximized).Bind(9, static_cast<int64_t>(i));
+    s.Bind(8, w.maximized).Bind(9, static_cast<int64_t>(i)).Bind(10, w.linked_id);
     if (!s.Run()) return false;
   }
   return txn.Commit();

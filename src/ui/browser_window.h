@@ -72,8 +72,41 @@ class BrowserWindow {
   WindowRecord ToRecord() const;
 
   // Workspaces and tabs.
+  // The spaces this window switches between: those of every normal profile
+  // (one order; Zen's container per space), or a private window's own. The
+  // window's profile is always its current space's.
+  std::vector<Workspace*> Spaces() const;
   // |start_empty|: open on an empty tab even when the space has tabs.
   void ShowWorkspace(Workspace* workspace, int64_t active_tab_id, bool start_empty = false);
+  // "Profile ▸" in the space menu: |ws| moves to |profile| (its tabs reload,
+  // signed out, in that profile's storage). Shows a toast.
+  bool MoveSpaceToProfile(Workspace* ws, Profile* profile);
+  void OnSpaceProfileChanged(Workspace* ws);  // some space moved to another profile
+  void ForgetProfile(Profile* profile);       // its spaces and tabs are about to go
+  void ForgetSpace(Workspace* ws);            // |ws| is about to be deleted
+  void SwitchToSpace(Workspace* ws) { SwitchWorkspace(ws); }
+
+  // Linked window spaces (instead of Zen's window sync). "Move to → New
+  // window" and a tab dragged out of every Orbit window tear the tab off
+  // into a new window with a temporary space linked to the current one (its
+  // parent): same profile, the parent's Essentials, the tab's live page kept.
+  // |screen|: where the drag ended (the new window opens there).
+  BrowserWindow* TearOffTab(Tab* tab, std::optional<POINT> screen = std::nullopt);
+  // The linked space this window was made for; it stays this window's while
+  // the window shows another space (until its tabs go back).
+  Workspace* linked_space() const { return linked_space_; }
+  void AdoptLinkedSpace(Workspace* ws);  // session restore
+  // The linked spaces of the current space, shown as "temp folder" rows.
+  std::vector<Workspace*> LinkedChildren() const;
+  // Focuses the window of |linked| (showing it there).
+  void FocusLinkedSpace(Workspace* linked);
+  // The window is about to close and its space goes away first (a linked
+  // window's tabs go back to their parent): it lets go of what it shows.
+  void DetachWorkspace();
+  // "Move to space" / "Move to window": across profiles too (the tab unloads
+  // and loads again in the new profile), never into or out of private ones.
+  void MoveTabToWorkspace(Tab* tab, Workspace* target);
+  void MoveTabToWindow(Tab* tab, BrowserWindow* target);
   Tab* OpenTab(const std::wstring& url, bool activate);
   Tab* OpenTabNear(Tab* opener, const std::wstring& url, bool activate);
   // A new tab that space routing may send to another space (links opened in
@@ -91,9 +124,22 @@ class BrowserWindow {
   void OnTabsChanged();
   void OnContentFocused(Tab* tab);
   void OnTabMovedAway(Tab* tab);  // another window took one of our tabs
+  void OnDevToolsChanged(Tab* tab);  // its DevTools opened, closed or loaded
 
-  // Zen Essentials (ZenPinnedTabManager.addToEssentials / removeEssentials).
+  // DevTools, docked to the right of the page (Chrome's default): F12 and
+  // Ctrl+Shift+I toggle them for the current tab; "Inspect" in the page menu
+  // selects the element under the pointer. The divider resizes the pane.
+  void ToggleDevTools();
+  void InspectElement(Tab* tab, int x, int y);
+  RECT DevToolsRectPx() const;  // empty when no pane shows (tests)
+
+  // Zen Essentials (ZenPinnedTabManager.addToEssentials / removeEssentials),
+  // one grid per space (zen.workspaces.separate-essentials, always on).
   static constexpr int kMaxEssentials = 12;  // zen.tabs.essentials.max
+  // The grid on screen: the current space's (a linked space shows its
+  // parent's). Null when that space has none yet.
+  Workspace* essentials() const;
+  bool IsEssential(const Tab* tab) const;  // in that grid
   bool CanAddToEssentials(const Tab* tab) const;
   bool AddToEssentials(Tab* tab);
   void RemoveFromEssentials(Tab* tab);
@@ -226,6 +272,9 @@ class BrowserWindow {
   // above the page, with the window controls; the sidebar holds the space.
   bool multi_toolbar() const { return multi_toolbar_ && !chrome_hidden(); }
   D2D1_RECT_F toolbar_rect() const { return toolbar_; }  // tests
+  D2D1_RECT_F essentials_rect() const { return essentials_rect_; }  // tests
+  std::vector<D2D1_RECT_F> essential_tile_rects() const { return EssentialRects(); }  // tests
+  void ForceLayoutForTest() { Layout(); }  // tests
   D2D1_RECT_F address_rect() const { return address_rect_; }  // tests
   bool reordering_spaces() const { return reordering_spaces_; }
   std::vector<D2D1_RECT_F> space_icon_rects() const { return workspace_dots_; }  // tests (DIPs)
@@ -331,10 +380,16 @@ class BrowserWindow {
 
   // UI Automation (see ui/accessibility.h).
   std::vector<AccessibleItem> AccessibleItems() const;
+  bool ExtensionsButtonShown() const;
+  void ShowExtensionsMenu();
   void AccessibleInvoke(int kind, intptr_t key);  // posted to the window
   void AccessibleFocus(int kind, intptr_t key);
   void OnDownloadsChanged();
   void OnBookmarksChanged();
+  // The profile's extension list changed: the extensions button appears or goes.
+  void OnExtensionsChanged();
+  // Zen's toast in the window's top-right corner.
+  void ShowToast(ui::Toast::Content content);
 
  private:
   enum class HitKind {
@@ -345,6 +400,7 @@ class BrowserWindow {
     kSiteInfo,
     kStar,
     kCopyUrl,
+    kExtensions,      // the extensions button: lists extension actions
     kMenu,
     kSidebarToggle,   // compact mode
     kCaptionMin,
@@ -360,7 +416,7 @@ class BrowserWindow {
     kTab,
     kTabClose,
     kTabResetPin,  // the pinned tab's "back to pinned url" button
-    kEssential,    // index = position in profile()->essentials()
+    kEssential,    // index = position in essentials()
     kGroup,  // index = position in workspace()->groups()
     kSidebarEdge,
     kTabListEmpty,  // empty space below the tabs (double-click opens a tab)
@@ -371,13 +427,16 @@ class BrowserWindow {
     kMediaClose,
     kMediaSeek,
     kLiveError,  // a live folder's error label; index = position in groups()
+    kLinked,      // a linked window's folder row; index = position in LinkedChildren()
+    kLinkedBack,  // the linked window's "back to the parent" arrow
+    kDevToolsEdge,  // the divider between the page and its DevTools
   };
   struct Hit {
     HitKind kind = HitKind::kNone;
     int index = -1;
     bool operator==(const Hit& o) const { return kind == o.kind && index == o.index; }
   };
-  enum InternalPage { kPageDownloads, kPageBookmarks, kPageHistory, kPageSettings };
+  enum InternalPage { kPageDownloads, kPageBookmarks, kPageHistory, kPageSettings, kPageExtensions };
 
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
   static LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -433,6 +492,7 @@ class BrowserWindow {
     float top = 0.f;        // offset from the top of the list, before scrolling
     int64_t split = 0;      // a split view's row: `tab` is its first member
     int depth = 0;          // folder nesting (indentation)
+    int64_t linked = 0;     // a linked window space's row (its id); `tab` is -1
   };
   std::vector<Row> Rows() const;
   float PeripheryTop() const;     // list offset of the separator / new tab block
@@ -499,6 +559,10 @@ class BrowserWindow {
                    int64_t group_id);
   void PaintGroupRow(ID2D1RenderTarget* rt, const Row& row, const D2D1_RECT_F& rect,
                      bool focused);
+  void PaintLinkedRow(ID2D1RenderTarget* rt, const Row& row, const D2D1_RECT_F& rect,
+                      bool focused);
+  int LinkedIndex(int64_t linked_id) const;  // in LinkedChildren(), or -1
+  void ShowLinkedMenu(Workspace* linked, POINT screen);
   void PaintIconButton(ID2D1RenderTarget* rt, const D2D1_RECT_F& r, wchar_t glyph, Hit hit,
                        bool enabled, const D2D1_COLOR_F* color = nullptr);
   void PaintSoftShadow(ID2D1RenderTarget* rt, const D2D1_RECT_F& r, float radius,
@@ -516,7 +580,6 @@ class BrowserWindow {
   D2D1_COLOR_F UrlFieldColor() const;  // opaque, so the EDIT can match it
   void Invalidate();
   void UpdateSpinnerTimer();
-  void ShowToast(ui::Toast::Content content);
   bool CanCopyUrlFromButton() const;
   void ShareUrl(const std::wstring& url, const std::wstring& title);
   std::wstring last_share_url_;
@@ -535,6 +598,9 @@ class BrowserWindow {
   void ShowWorkspaceMenu(int index, POINT screen);
   void ShowGroupMenu(int64_t group_id, POINT screen);
   void ShowEssentialMenu(Tab* tab, POINT screen);
+  // Shows |tab| wherever it lives: its space (switching here, or in the
+  // window that shows it) or this window's Essentials.
+  void RevealTab(Tab* tab);
   std::vector<D2D1_RECT_F> EssentialRects() const;
   void PaintEssentials(ID2D1RenderTarget* rt);
   void ToggleGroup(int64_t group_id);
@@ -561,8 +627,14 @@ class BrowserWindow {
 
   void DuplicateTab(Tab* tab);
   void TogglePin(Tab* tab);
-  void MoveTabToWorkspace(Tab* tab, Workspace* target);
-  void MoveTabToWindow(Tab* tab, BrowserWindow* target);
+  // A space of this window's list (any profile, or the private profile's).
+  Workspace* FindSpace(int64_t id) const;
+  // The tab containers whose tabs this window can switch to (URL bar
+  // results, the media card): every normal profile's, or its private one's.
+  std::vector<Workspace*> TabContainers() const;
+  // A space's name in menus, with its profile when that is not the default.
+  std::wstring SpaceLabel(const Workspace* ws) const;
+  void OnProfileChanged();  // the current space belongs to another profile now
   void SelectRelativeTab(int delta);
   void SelectTabIndex(int index);
   void SelectRelativeWorkspace(int delta);
@@ -637,6 +709,9 @@ class BrowserWindow {
 
   Profile* profile_;
   Workspace* workspace_ = nullptr;
+  Workspace* linked_space_ = nullptr;  // see linked_space()
+  int drop_linked_ = -1;                // a dragged tab is over this linked row
+  D2D1_RECT_F linked_back_{};           // the linked window's back arrow
   // An Essential on screen instead of the space's own active tab, and per
   // space the Essential that was selected when the user left it.
   Tab* active_essential_ = nullptr;
@@ -650,6 +725,7 @@ class BrowserWindow {
   std::wstring urlbar_behavior_ = L"floating-on-type";  // zen.urlbar.behavior
   bool ctrl_tab_skip_pending_ = false;  // zen.tabs.ctrl-tab.ignore-pending-tabs
   bool grey_out_inactive_ = true;       // zen.view.grey-out-inactive-windows
+  bool urlbar_wide_ = false;            // multiple toolbars: the URL field up to 800 (else 560)
   bool right_side_ = false;             // zen.tabs.vertical.right-side
   // Media card state.
   Tab* media_tab_ = nullptr;
@@ -681,6 +757,11 @@ class BrowserWindow {
   int drag_from_ = -1;
   int drop_index_ = -1;  // insertion point as an index into Rows()
   bool resizing_sidebar_ = false;
+  bool resizing_devtools_ = false;
+  float devtools_width_ = 440.f;  // DIPs (pref "devtools_width")
+  // The page and DevTools rects within |content| (px), when the active tab
+  // shows its DevTools; false otherwise.
+  bool DevToolsLayout(const RECT& content, RECT* page, RECT* tools) const;
   bool tracking_mouse_ = false;
   bool tracking_nc_mouse_ = false;
   Hit tooltip_hit_;
@@ -863,7 +944,7 @@ class BrowserWindow {
 
   // Cached layout rects (DIPs).
   D2D1_RECT_F address_rect_{}, back_{}, forward_{}, reload_{}, site_info_{}, menu_{}, star_{},
-      copy_url_{},
+      copy_url_{}, ext_btn_{},
       toggle_{}, caption_min_{}, caption_max_{}, caption_close_{}, ws_indicator_{},
       ws_actions_{}, essentials_rect_{}, list_{}, footer_{}, downloads_{}, create_new_{}, panel_{};
   std::vector<D2D1_RECT_F> workspace_dots_;

@@ -11,10 +11,15 @@ $tp = Join-Path $root 'third_party'
 $dl = Join-Path $tp 'downloads'
 New-Item -ItemType Directory -Force $dl | Out-Null
 
-$cefVersion = '152.0.14+g8a0b5b9+chromium-152.0.7977.167'
+# Third-party CEF build with H.264/AAC (proprietary_codecs=true
+# ffmpeg_branding=Chrome): github.com/psmux/godwinmix-cef. The official
+# Spotify CDN build (152.0.14, SHA-1 0bad9c7d50f2fbf508bdf47e8f885590bb4d19ae)
+# has no such codecs. These builds carry NO patent licence for H.264/AAC; that
+# is the user's responsibility (docs/build.md).
+$cefVersion = '154.0.34+g14c5a08+chromium-154.0.8037.98'
 $cefFile = "cef_binary_${cefVersion}_windows64_minimal.tar.bz2"
-$cefSha1 = '0bad9c7d50f2fbf508bdf47e8f885590bb4d19ae'
-$cefUrl = 'https://cef-builds.spotifycdn.com/' + [Uri]::EscapeDataString($cefFile)
+$cefSha256 = 'af1f188711b4e9220c87e2a90377d5bddd70e163909070dd81f6f3bb2fc884ce'
+$cefUrl = 'https://github.com/psmux/godwinmix-cef/releases/download/cef-154.0.34/' + [Uri]::EscapeDataString($cefFile)
 
 $sqliteFile = 'sqlite-amalgamation-3540100.zip'
 $sqliteSha3 = '92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30'
@@ -29,7 +34,7 @@ function Get-Verified([string] $url, [string] $path, [scriptblock] $verify) {
 
 # --- CEF ---
 $cefArchive = Join-Path $dl 'cef_minimal.tar.bz2'
-Get-Verified $cefUrl $cefArchive { param($p) (Get-FileHash $p -Algorithm SHA1).Hash -eq $cefSha1 }
+Get-Verified $cefUrl $cefArchive { param($p) (Get-FileHash $p -Algorithm SHA256).Hash -eq $cefSha256 }
 $cefDir = Join-Path $tp 'cef'
 $versionHeader = Join-Path $cefDir 'include\cef_version.h'
 if (-not ((Test-Path $versionHeader) -and (Select-String -Path $versionHeader -SimpleMatch "`"$cefVersion`"" -Quiet))) {
