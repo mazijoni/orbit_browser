@@ -392,7 +392,17 @@ void OrbitApp::OnBrowserDestroyed(CefRefPtr<CefBrowser> browser) {
 
 void OrbitApp::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                                 CefRefPtr<CefV8Context> context) {
-  if (IsChromeWebStoreUrl(frame->GetURL().ToString())) {
+  // The frame's URL is not always set yet (a page reached by a redirect), so
+  // the page's own location is asked as well.
+  std::string page_url = frame->GetURL().ToString();
+  if (!IsChromeWebStoreUrl(page_url)) {
+    CefRefPtr<CefV8Value> href;
+    CefRefPtr<CefV8Exception> href_exception;
+    if (context->Eval("location.href", CefString(), 0, href, href_exception) && href && href->IsString()) {
+      page_url = href->GetStringValue().ToString();
+    }
+  }
+  if (IsChromeWebStoreUrl(page_url)) {
     CefRefPtr<CefV8Value> ignored;
     CefRefPtr<CefV8Exception> brand_exception;
     context->Eval(kStoreBrand, CefString(), 0, ignored, brand_exception);

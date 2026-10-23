@@ -114,7 +114,9 @@ class BrowserWindow {
   // tab waits there unloaded; a toast says where it went.
   Tab* OpenRoutedTab(const std::wstring& url, bool activate, bool external, Tab* opener = nullptr);
   // Inserts a tab for a Chromium-created popup and points |info| at its host.
-  Tab* CreatePopupTab(Tab* opener, const std::wstring& url, bool activate, CefWindowInfo& info);
+  // |as_glance|: shown as a glance over |opener| (sign-in popups) instead of a tab.
+  Tab* CreatePopupTab(Tab* opener, const std::wstring& url, bool activate, CefWindowInfo& info,
+                      bool as_glance = false);
   void ActivateTab(Tab* tab);
   Tab* active_tab() const;
 

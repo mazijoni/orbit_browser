@@ -11,6 +11,7 @@ namespace orbit::self_test {
 // Owns one worker thread that is always joined in Stop()/the destructor.
 //   /page?t=<title>[&script=<js>]  HTML page with that title
 //   /text?t=<title>&body=<text>    HTML page with that title and text
+//   /popupbtn                      a link that opens a popup window (window.open with features)
 //   /login                         a sign-in form (#u, #p), submit stays on the page
 //   /file.bin                      1 MiB attachment
 //   /attack?target=<orbit url>    page that tries to reach a orbit:// API

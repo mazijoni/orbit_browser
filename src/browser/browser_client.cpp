@@ -263,24 +263,16 @@ bool BrowserClient::OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFr
     return true;
   }
 
-  // window.open(url, name, "width=...,height=...") — a real popup (OAuth /
-  // sign-in): a native window owned by the opener, so window.close() works
-  // and focus returns to the opener. Everything else becomes a sidebar tab.
+  // window.open(url, name, "width=...,height=...") — a sign-in popup (OAuth):
+  // shown as a glance over the page that opened it. It is a real popup of the
+  // opener (window.opener, postMessage and window.close() keep working), but
+  // lives inside Orbit's window as a tab, never as a window of its own (a
+  // native Alloy popup crashed in Chrome style).
   if (target_disposition == CEF_WOD_NEW_POPUP) {
-    RECT owner{};
-    ::GetWindowRect(window->hwnd(), &owner);
-    const UINT dpi = ::GetDpiForWindow(window->hwnd());
-    const int w = popupFeatures.widthSet ? ::MulDiv(popupFeatures.width, dpi, 96) : 0;
-    const int h = popupFeatures.heightSet ? ::MulDiv(popupFeatures.height, dpi, 96) : 0;
-    CefRect rect;
-    rect.width = w > 100 ? w : (owner.right - owner.left) * 2 / 3;
-    rect.height = h > 100 ? h : (owner.bottom - owner.top) * 2 / 3;
-    rect.x = owner.left + ((owner.right - owner.left) - rect.width) / 2;
-    rect.y = owner.top + ((owner.bottom - owner.top) - rect.height) / 2;
-    windowInfo.SetAsPopup(window->hwnd(), target_frame_name);
-    windowInfo.bounds = rect;
-    windowInfo.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
-    return false;  // allow; OnAfterCreated registers it as a native popup
+    Tab* tab = window->CreatePopupTab(opener, target_url.ToWString(), true, windowInfo, /*as_glance=*/true);
+    if (!tab) return true;
+    pending_popups_[popup_id] = tab;
+    return false;
   }
 
   // Letting Chromium create the browser (instead of cancelling and opening the
@@ -354,6 +346,7 @@ void BrowserClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   if (it == tabs_.end()) return;
   Tab* tab = it->second;
   tabs_.erase(it);
+  tab->NoteClosedByPage();
   // Chrome style closes a child browser without calling DoClose; run what
   // DoClose does (detach a tab that is being closed) here instead.
   if (tab->load_state() != Tab::LoadState::kClosing && tab->OnDoClose()) {

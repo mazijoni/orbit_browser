@@ -402,7 +402,7 @@ void Tab::PrepareForPopup(BrowserWindow* window, CefWindowInfo& info) {
   RECT rc;
   ::GetClientRect(host_, &rc);
   info.SetAsChild(host_, CefRect(0, 0, rc.right, rc.bottom));
-  info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+  info.runtime_style = kTabRuntimeStyle;
   load_state_ = LoadState::kCreating;
 }
 
@@ -492,6 +492,14 @@ void Tab::SetMuted(bool muted) {
   muted_ = muted;
   if (browser_) browser_->GetHost()->SetAudioMuted(muted);
   NotifyChanged();
+}
+
+void Tab::NoteClosedByPage() {
+  if (close_requested_ || unloading_ || recreate_after_close_ || reload_if_shown_ ||
+      load_state_ == LoadState::kClosing) {
+    return;  // Orbit asked for this close itself
+  }
+  close_requested_ = true;
 }
 
 void Tab::RequestClose() {

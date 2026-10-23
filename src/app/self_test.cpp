@@ -3110,6 +3110,41 @@ void AddZenSuite(Runner& r) {
   r.Add("... Escape / close removes the bar", [] { FindBar::Close(); }, [s] {
     return !FindBar::Alive() && !FindBar::IsOpenFor(s->window);
   }, 10000);
+  // Sign-in popups appear as a glance over the page that opened them.
+  struct Pop {
+    Tab* opener = nullptr;
+    size_t windows = 0;
+    TestHttpServer server;
+  };
+  auto pp = std::make_shared<Pop>();
+  r.Add("popup: window.open with features becomes a glance, not a window", [s, pp, app, &r] {
+    r.Check(pp->server.Start(), "test HTTP server listening");
+    pp->windows = app->windows().size();
+    pp->opener = s->window->OpenTab(pp->server.Url(L"/popupbtn"), true);
+  }, [s, pp, &r] {
+    if (pp->opener->loading() || pp->opener->record().title != L"popupbtn" || !pp->opener->browser()) return false;
+    static bool clicked = false;
+    if (!clicked) {
+      clicked = true;
+      CefMouseEvent e;
+      e.x = 60;
+      e.y = 60;
+      e.modifiers = 0;
+      CefRefPtr<CefBrowserHost> host = pp->opener->browser()->GetHost();
+      host->SendMouseMoveEvent(e, false);
+      host->SendMouseClickEvent(e, MBT_LEFT, false, 1);
+      host->SendMouseClickEvent(e, MBT_LEFT, true, 1);
+      return false;
+    }
+    Tab* g = s->window->glance_tab();
+    if (!g || g->record().title != L"PopupGlance") return false;
+    r.Check(true, "the popup page is the window's glance");
+    return true;
+  }, 15000);
+  r.Add("... no other window opened, and window.close() closes the glance", [s, pp, app, &r] {
+    r.Check(app->windows().size() == pp->windows, "no extra Orbit window");
+    s->window->glance_tab()->browser()->GetMainFrame()->ExecuteJavaScript("window.close()", "", 0);
+  }, [s] { return s->window->glance_tab() == nullptr; }, 10000);
   // Saving a new login after sign-in.
   struct Login {
     Tab* tab = nullptr;

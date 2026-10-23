@@ -2185,8 +2185,10 @@ Tab* BrowserWindow::OpenRoutedTab(const std::wstring& url, bool activate, bool e
 }
 
 Tab* BrowserWindow::CreatePopupTab(Tab* opener, const std::wstring& url, bool activate,
-                                   CefWindowInfo& info) {
+                                   CefWindowInfo& info, bool as_glance) {
   if (!workspace_) return nullptr;
+  // A glance needs an opener in this space that is not itself a glance.
+  as_glance = as_glance && opener && workspace_->IndexOf(opener) >= 0 && !IsGlanceTab(opener);
   TabRecord rec;
   rec.url = url;
   const int index = opener ? workspace_->IndexOf(opener) + 1 : -1;
@@ -2195,6 +2197,19 @@ Tab* BrowserWindow::CreatePopupTab(Tab* opener, const std::wstring& url, bool ac
     workspace_->SetTabGroup(tab, opener->record().group_id);
   }
   tab->PrepareForPopup(this, info);
+  if (as_glance) {
+    // As OpenGlance: the popup page floats over its opener; closing it
+    // (window.close(), the glance's own close button) returns to the opener.
+    CloseGlance();
+    if (active_tab() != opener) ActivateTab(opener);
+    glance_ = GlanceState{opener, tab};
+    ActivateTab(tab);
+    tab->set_owner(opener);
+    DropEmptyPlaceholder(tab);
+    Layout();
+    UpdateAnimationTimer(::GetTickCount64());
+    return tab;
+  }
   if (activate) {
     tab->set_owner(opener);
     ActivateTab(tab);

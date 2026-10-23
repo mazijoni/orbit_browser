@@ -37,26 +37,31 @@ inline constexpr char kPasswordSubmitMessage[] = "orbit.password-submit";
 // hidden. Runs on the store's own pages only, and again as the page changes.
 inline constexpr char kStoreRename[] = R"js((function () {
   const phrases = [[/\b(Add|Added|Remove|Removed) (to|from) Chrome\b/g, '$1 $2 Orbit'],
-                   [/\bAdding to Chrome\b/g, 'Adding to Orbit']];
+                   [/\bAdding to Chrome\b/g, 'Adding to Orbit'],
+                   [/Switch to Chrome to install extensions and themes/g, 'Extensions you add here are installed in Orbit']];
   const rewrite = (root) => {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    const hide = [];
+    const buttons = [], nags = [];
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
       let t = n.nodeValue;
       if (!t || t.length > 200) continue;
       for (const [re, to] of phrases) t = t.replace(re, to);
       if (t !== n.nodeValue) n.nodeValue = t;
-      if (/Switch to Chrome|Install Chrome/.test(t)) hide.push(n);
+      if (t.trim() === 'Install Chrome') buttons.push(n);
+      if (/recommends using Chrome/.test(t)) nags.push(n);
     }
-    for (const n of hide) {
-      let el = n.parentElement, top = null;
-      while (el && el !== document.body) {
-        const r = el.getBoundingClientRect();
-        if (r.height > 140 || r.width < 40) break;
-        top = el;
-        el = el.parentElement;
+    // Only the "Install Chrome" button itself is hidden.
+    for (const n of buttons) {
+      const b = n.parentElement && n.parentElement.closest('button, a');
+      if (b) b.style.display = 'none';
+    }
+    // The pop-up that suggests Chrome is dismissed with its own "No thanks".
+    for (const n of nags) {
+      let el = n.parentElement;
+      for (let i = 0; el && i < 6; ++i, el = el.parentElement) {
+        const no = Array.from(el.querySelectorAll('button')).find((x) => /^No thanks$/.test((x.innerText || '').trim()));
+        if (no) { no.click(); break; }
       }
-      if (top && top.getBoundingClientRect().width > 200) top.style.display = 'none';
     }
   };
   let pending = false;

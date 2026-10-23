@@ -137,6 +137,12 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
     body = "<!doctype html><title>login</title><body><form id=f onsubmit=\"return false\">"
            "<input id=u type=text name=user><input id=p type=password name=pass>"
            "<button type=submit>Sign in</button></form></body>";
+  } else if (path == "/popupbtn") {
+    // A big link at the top-left that opens a sign-in style popup window.
+    body = "<!doctype html><title>popupbtn</title><style>body{margin:0}a{display:block;width:400px;height:200px;"
+           "background:#ddd}</style><a href=\"#\" onclick=\"window.open('/page?t=PopupGlance','login',"
+           + std::string(target.find("plain") != std::string::npos ? "''" : "'width=420,height=320'") +
+           ");return false\">sign in</a>";
   } else if (path == "/text") {
     // /text?t=<title>&body=<text>: a page of plain text (find in page).
     body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) + "</title><body><p>" +

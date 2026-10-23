@@ -145,6 +145,8 @@ class Tab {
   // when Chromium confirms the close (DoClose).
   void RequestClose();
   bool close_requested() const { return close_requested_; }
+  // The page closed its own browser (window.close()): the tab goes with it.
+  void NoteClosedByPage();
   // Marks the tab as part of a multi-tab close so it is reopened together.
   void set_close_batch(int64_t batch) { close_batch_ = batch; }
   int64_t close_batch() const { return close_batch_; }

@@ -41,18 +41,25 @@ bool DefaultClient::Adopt(CefRefPtr<CefBrowser> browser, const std::string& url)
   if (!IsAdoptableUrl(url)) return false;
   Application* app = Application::Get();
   CefRefPtr<CefRequestContext> context = browser->GetHost()->GetRequestContext();
-  for (const auto& profile : app->profiles()) {
-    if (!profile->has_request_context() || !context || !profile->request_context()->IsSame(context)) continue;
-    for (const auto& window : app->windows()) {
-      if (window->profile() != profile.get() || window->closing()) continue;
-      adopted_.insert(browser->GetIdentifier());
-      window->OpenTab(FromUtf8(url), true);
-      browser->GetHost()->CloseBrowser(true);
-      ORBIT_LOG_INFO("a page Chromium opened on its own became a tab");
-      return true;
+  // The window of the profile the browser belongs to; failing that (Chromium's
+  // own default profile), any window.
+  BrowserWindow* target = nullptr;
+  for (const auto& window : app->windows()) {
+    if (window->closing() || window->profile()->is_private()) continue;
+    Profile* profile = window->profile();
+    const bool same = context && profile->has_request_context() && profile->request_context()->IsSame(context);
+    if (same) {
+      target = window.get();
+      break;
     }
+    if (!target) target = window.get();
   }
-  return false;
+  if (!target) return false;
+  adopted_.insert(browser->GetIdentifier());
+  target->OpenTab(FromUtf8(url), true);
+  browser->GetHost()->CloseBrowser(true);
+  ORBIT_LOG_INFO("a page Chromium opened on its own became a tab");
+  return true;
 }
 
 bool DefaultClient::OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
