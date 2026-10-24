@@ -135,6 +135,7 @@ class BrowserWindow {
   void ToggleDevTools();
   void InspectElement(Tab* tab, int x, int y);
   RECT DevToolsRectPx() const;  // empty when no pane shows (tests)
+  RECT DevToolsPageRectPx() const;  // the page beside docked DevTools (tests)
 
   // Zen Essentials (ZenPinnedTabManager.addToEssentials / removeEssentials),
   // one grid per space (zen.workspaces.separate-essentials, always on).
@@ -375,7 +376,16 @@ class BrowserWindow {
   bool url_bar_breakout() const { return popup_visible_ && popup_anchor_ == PopupAnchor::kSidebar; }
   // The id of the toast currently shown, or empty (self-tests).
   std::wstring visible_toast_id() const { return toast_ ? toast_->visible_id() : L""; }
-  void SetContentFullscreen(bool fullscreen);
+  // A page (|tab|) entered or left HTML fullscreen (a video's fullscreen button).
+  void SetContentFullscreen(Tab* tab, bool fullscreen);
+  // DevTools moved to another side (or their own window): lay the page out again.
+  void OnDevToolsDockChanged() { ShowContent(); }
+  // Leaves page fullscreen: the page is told, the window comes back.
+  void ExitContentFullscreen();
+  bool content_fullscreen() const { return content_fullscreen_; }
+  Tab* fullscreen_tab() const { return fullscreen_tab_; }
+  // Sidebar and toolbar hidden (page or window fullscreen); self-tests.
+  bool chrome_hidden_for_test() const { return content_fullscreen_ || window_fullscreen_; }
   void BeginClose();
   void ApplyTheme();
   // Collapsed sidebar: icons only (Zen's "zen.view.sidebar-expanded" off).
@@ -813,6 +823,7 @@ class BrowserWindow {
 
   // Fullscreen.
   bool content_fullscreen_ = false;
+  Tab* fullscreen_tab_ = nullptr;  // the page in HTML fullscreen
   bool window_fullscreen_ = false;
   WINDOWPLACEMENT saved_placement_{sizeof(WINDOWPLACEMENT)};
   LONG_PTR saved_style_ = 0;

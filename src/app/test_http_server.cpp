@@ -176,6 +176,13 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
     // A page with a red 16x16 favicon (a data: PNG).
     body = "<!doctype html><title>iconpage</title><link rel=icon href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGO4Iyf3nxLMMGrAqAGjBgwXAwDHMhcf6ozWIQAAAABJRU5ErkJggg==\">"
            "<body>icon</body>";
+  } else if (path == "/fullscreen") {
+    // A big button at the top-left that puts the page in fullscreen (like a
+    // video's fullscreen button); the title follows the state.
+    body = "<!doctype html><title>fs-off</title><style>body{margin:0}button{width:400px;height:200px}</style>"
+           "<button onclick=\"document.documentElement.requestFullscreen()\">full</button><script>"
+           "document.onfullscreenchange = () => document.title = document.fullscreenElement ? 'fs-on' : 'fs-off';"
+           "</script>";
   } else if (path == "/text") {
     // /text?t=<title>&body=<text>: a page of plain text (find in page).
     body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) + "</title><body><p>" +

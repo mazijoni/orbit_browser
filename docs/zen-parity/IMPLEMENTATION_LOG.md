@@ -390,6 +390,21 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
   - A sleeping or unloaded tab's icon is drawn in grayscale (Rec. 601 luminance) at 60% opacity, in the sidebar and the Essentials grid (`BitmapFor(..., gray)`).
   - `zen` test: the icon is stored, a tab built from the record has the right pixels before loading, and a discarded tab keeps its icon.
 
+- 0.1.6 (2026-10-25):
+  1. **Page fullscreen and links from other apps.** A link from another app (or a tab switch) while a video was fullscreen showed the new page fullscreen, with Escape doing nothing.
+     - The window now remembers which page is fullscreen (`fullscreen_tab_`).
+     - When another page is shown, that page leaves fullscreen and the window comes back (`ShowContent` → `ExitContentFullscreen`).
+     - Escape and F11 act on the fullscreen page.
+     - `zen` test: fullscreen via a real click, then a routed external link.
+  2. **One DevTools, as docked Chrome's.**
+     - Chromium's own "Inspect" item (which opened its DevTools in a separate Chromium window) is removed from the page menu.
+     - Orbit's DevTools load with `can_dock=true`, which brings the device toolbar, the dock-side menu and the close button.
+     - A bridge script in the front-end (`kDevToolsBridge`) sends `closeWindow`, the dock side (`currentDockState`) and `setInspectedPageBounds` back as console messages.
+     - Docked, DevTools cover the page area and lay it out themselves (their divider, left / right / bottom). The page goes into the place they keep for it, and their window has a hole there.
+     - Undocked, the host becomes a window of its own. DevTools' device-emulation "toolbox" popup is refused, and links from DevTools open as tabs.
+     - DevTools follow Orbit's theme (emulated `prefers-color-scheme` on the DevTools browser).
+     - `zen` tests: can_dock + bridge + colour scheme, bottom / left / own window / right through DevTools' DockController, and the close button.
+
 ## Next actions
 
 1. Check by hand, with a real mouse: drag a tab out of the window onto the desktop (a linked window opens at the cursor), and onto another Orbit window (the tab moves there).

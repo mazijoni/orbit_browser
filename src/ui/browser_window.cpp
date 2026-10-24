@@ -252,6 +252,7 @@ BrowserWindow::BrowserWindow(Profile* profile) : profile_(profile) {
   if (auto w = store.GetPref(Store::kGlobalScope, L"devtools_width")) {
     devtools_width_ = std::clamp(static_cast<float>(_wtof(w->c_str())), 240.f, 2000.f);
   }
+
   compact_mode_ = store.GetPref(Store::kGlobalScope, L"sidebar_hidden") == L"1";
 }
 
@@ -980,10 +981,16 @@ std::vector<BrowserWindow::PaneRect> BrowserWindow::SplitPanes(
 }
 
 void BrowserWindow::ShowContent() {
+  // Page fullscreen belongs to one page: when another one is shown (a link
+  // from another app opened a tab, a tab switch), the window comes back
+  // instead of showing the new page fullscreen with no way out.
+  if (content_fullscreen_ && fullscreen_tab_ != active_tab()) {
+    ExitContentFullscreen();
+  }
   std::vector<Tab*> visible;
   std::vector<RECT> rects;
   Tab* devtools_tab = nullptr;
-  RECT devtools_rect{};
+  RECT devtools_rect{}, devtools_page{};
   if (glance_ && active_tab() == glance_->tab) {
     visible = {glance_->parent, glance_->tab};
     rects = {ContentRectPx(), ToPx(GlanceRectNow(::GetTickCount64()))};
@@ -995,6 +1002,7 @@ void BrowserWindow::ShowContent() {
       if (DevToolsLayout(ContentRectPx(), &page, &tools)) devtools_tab = tab;
       rects.push_back(page);
       devtools_rect = tools;
+      devtools_page = page;
     } else {
       for (const PaneRect& pane : panes) {
         visible.push_back(pane.tab);
@@ -1016,7 +1024,10 @@ void BrowserWindow::ShowContent() {
     if (glancing && i == 1) PlaceGlanceChrome(true);
     visible[i]->Show(rects[i], ContentCornerPx());
     if (visible[i] == devtools_tab) {
-      visible[i]->ShowDevToolsPane(devtools_rect, ContentCornerPx());
+      visible[i]->ShowDevToolsPane(devtools_rect, devtools_page, ContentCornerPx());
+    } else if (visible[i] == active_tab() && visible[i]->devtools_open() &&
+               GetDevToolsDock() == DevToolsDock::kUndocked) {
+      visible[i]->ShowDevToolsPane({}, {}, 0);  // its own window
     } else {
       visible[i]->HideDevToolsPane();
     }
@@ -1348,16 +1359,6 @@ BrowserWindow::Hit BrowserWindow::HitTest(float x, float y) const {
       }
     }
   }
-  {
-    RECT page{}, tools{};
-    if (SplitPanes().empty() && DevToolsLayout(ContentRectPx(), &page, &tools)) {
-      const float left = dip(static_cast<float>(page.right)), right = dip(static_cast<float>(tools.left));
-      if (x >= left - 2.f && x <= right + 2.f && y >= dip(static_cast<float>(tools.top)) &&
-          y < dip(static_cast<float>(tools.bottom))) {
-        return {HitKind::kDevToolsEdge, 0};
-      }
-    }
-  }
   if (multi_toolbar() && ui::Contains(toolbar_, x, y)) {
     if (ui::Contains(menu_, x, y)) return {HitKind::kMenu, 0};
     if (ui::Contains(toggle_, x, y)) return {HitKind::kSidebarToggle, 0};
@@ -1581,13 +1582,23 @@ Tab* BrowserWindow::active_tab() const {
 bool BrowserWindow::DevToolsLayout(const RECT& content, RECT* page, RECT* tools) const {
   Tab* tab = active_tab();
   if (!tab || !tab->devtools_open() || (glance_ && tab == glance_->tab) || content_fullscreen_) return false;
-  const int total = content.right - content.left;
-  const int gap = static_cast<int>(std::lround(px(ui::metrics::kSeparation)));
-  const int min_w = static_cast<int>(std::lround(px(240.f)));
-  if (total < 2 * min_w + gap) return false;
-  const int w = std::clamp(static_cast<int>(std::lround(px(devtools_width_))), min_w, total - min_w - gap);
-  *tools = {content.right - w, content.top, content.right, content.bottom};
-  *page = {content.left, content.top, tools->left - gap, content.bottom};
+  if (GetDevToolsDock() == DevToolsDock::kUndocked) return false;  // a window of its own
+  if (content.right <= content.left || content.bottom <= content.top) return false;
+  // As docked Chrome DevTools: they cover the page area and lay it out
+  // themselves (dock side, their own divider); the page goes into the place
+  // they keep for it (setInspectedPageBounds), and their window has a hole
+  // there (Tab::ShowDevToolsPane).
+  *tools = content;
+  const RECT b = tab->devtools_page_bounds();
+  if (b.right > b.left && b.bottom > b.top) {
+    const RECT placed{content.left + b.left, content.top + b.top, content.left + b.right, content.top + b.bottom};
+    ::IntersectRect(page, &placed, &content);
+  } else {
+    // Until they have said: their usual pane at the right.
+    const int total = content.right - content.left;
+    const int w = std::clamp(static_cast<int>(std::lround(px(devtools_width_))), 0, total / 2);
+    *page = {content.left, content.top, content.right - w, content.bottom};
+  }
   return true;
 }
 
@@ -1595,6 +1606,12 @@ RECT BrowserWindow::DevToolsRectPx() const {
   RECT page{}, tools{};
   if (!SplitPanes().empty() || !DevToolsLayout(ContentRectPx(), &page, &tools)) return {};
   return tools;
+}
+
+RECT BrowserWindow::DevToolsPageRectPx() const {
+  RECT page{}, tools{};
+  if (!SplitPanes().empty() || !DevToolsLayout(ContentRectPx(), &page, &tools)) return {};
+  return page;
 }
 
 void BrowserWindow::OnDevToolsChanged(Tab* tab) {
@@ -1653,6 +1670,10 @@ void BrowserWindow::OnTabRemoving(Tab* tab) {
     Layout();
   }
   std::erase(content_shown_, tab);
+  if (tab == fullscreen_tab_) {
+    fullscreen_tab_ = nullptr;
+    if (content_fullscreen_) SetContentFullscreen(nullptr, false);
+  }
   favicons_.erase(tab);
   pinned_favicons_.erase(tab);
   if (tab == rename_tab_) CancelRename();
@@ -1985,6 +2006,7 @@ void BrowserWindow::ForgetProfile(Profile* profile) {
     pins_collapsed_.erase(ws);
     last_essential_.erase(ws);
     for (const auto& t : ws->tabs()) {
+      if (fullscreen_tab_ == t.get()) fullscreen_tab_ = nullptr;
       favicons_.erase(t.get());
       pinned_favicons_.erase(t.get());
       overlay_favicons_.erase(t.get());
@@ -4496,8 +4518,8 @@ bool BrowserWindow::DispatchAccelerator(int vk, bool ctrl, bool shift, bool alt)
         if (tab) tab->GoForward();
         return true;
       case VK_ESCAPE:
-        if (content_fullscreen_ && tab && tab->browser()) {
-          tab->browser()->GetHost()->ExitFullscreen(true);
+        if (content_fullscreen_) {
+          ExitContentFullscreen();
           return true;
         }
         return false;
@@ -4595,20 +4617,33 @@ bool BrowserWindow::OnKeyDown(int vk) {
 // ---------------------------------------------------------------------------
 // Fullscreen
 
-void BrowserWindow::SetContentFullscreen(bool fullscreen) {
+void BrowserWindow::SetContentFullscreen(Tab* tab, bool fullscreen) {
+  if (fullscreen) {
+    fullscreen_tab_ = tab;
+  } else if (tab && fullscreen_tab_ && tab != fullscreen_tab_) {
+    return;  // another page's late "left fullscreen"
+  } else {
+    fullscreen_tab_ = nullptr;
+  }
   if (content_fullscreen_ == fullscreen) return;
   const bool was_hidden = chrome_hidden();
   content_fullscreen_ = fullscreen;
   if (was_hidden != chrome_hidden()) SetChromeFullscreen(chrome_hidden());
 }
 
+void BrowserWindow::ExitContentFullscreen() {
+  Tab* tab = fullscreen_tab_;
+  fullscreen_tab_ = nullptr;
+  if (tab && tab->browser()) tab->browser()->GetHost()->ExitFullscreen(true);
+  SetContentFullscreen(nullptr, false);
+}
+
 void BrowserWindow::ToggleWindowFullscreen() {
   const bool was_hidden = chrome_hidden();
   window_fullscreen_ = !window_fullscreen_;
   if (!window_fullscreen_ && content_fullscreen_) {
-    if (Tab* tab = active_tab(); tab && tab->browser()) {
-      tab->browser()->GetHost()->ExitFullscreen(true);
-    }
+    if (Tab* tab = fullscreen_tab_; tab && tab->browser()) tab->browser()->GetHost()->ExitFullscreen(true);
+    fullscreen_tab_ = nullptr;
     content_fullscreen_ = false;
   }
   if (was_hidden != chrome_hidden()) SetChromeFullscreen(chrome_hidden());

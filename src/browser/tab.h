@@ -19,6 +19,12 @@ class Workspace;
 
 enum class SecurityLevel { kNone, kSecure, kInsecure, kDangerous, kInternal };
 
+// Where DevTools sit (DevTools' own "Dock side" menu; pref "devtools_dock").
+enum class DevToolsDock { kRight, kLeft, kBottom, kUndocked };
+DevToolsDock GetDevToolsDock();
+// Saves the side and lays out every window again.
+void SetDevToolsDock(DevToolsDock dock);
+
 struct FaviconPixels {
   int width = 0;
   int height = 0;
@@ -125,11 +131,22 @@ class Tab {
   bool devtools_alive() const { return devtools_browser_ != nullptr || devtools_creating_; }
   CefRefPtr<CefBrowser> devtools_browser() const { return devtools_browser_; }
   BrowserWindow* devtools_window() const { return devtools_window_; }
-  void ShowDevToolsPane(const RECT& bounds_px, int corner_px);
+  // Docked DevTools over |bounds_px| (the page area) with a hole at |page_px|
+  // where the page shows; undocked: their own window (both rects unused).
+  void ShowDevToolsPane(const RECT& bounds_px, const RECT& page_px, int corner_px);
+  // Where docked DevTools keep the page, in pixels of their area; empty
+  // until they have said.
+  const RECT& devtools_page_bounds() const { return devtools_page_bounds_; }
   void HideDevToolsPane();
   void OnDevToolsCreated(CefRefPtr<CefBrowser> browser);
   void OnDevToolsClosing();  // DoClose: its host goes
   void OnDevToolsClosed();
+  // The DevTools front-end finished loading (DevToolsClient).
+  void OnDevToolsLoaded(CefRefPtr<CefFrame> frame);
+  // A request from the front-end's bridge: "close", "side:<dock side>".
+  void OnDevToolsMessage(const std::string& message);
+  HWND devtools_host() const { return devtools_host_; }
+  const std::string& last_devtools_message() const { return last_devtools_message_; }
   void Focus();
 
   void Navigate(const std::wstring& url);
@@ -223,6 +240,7 @@ class Tab {
 
   BrowserWindow* window_ = nullptr;
   CefRefPtr<CefRegistration> color_scheme_session_;
+  CefRefPtr<CefRegistration> devtools_color_session_;  // DevTools follow Orbit's theme
   HWND host_ = nullptr;
   SIZE region_size_{};  // size the host's rounded window region was made for
   int region_corner_ = -1;
@@ -243,6 +261,10 @@ class Tab {
   CefRefPtr<DevToolsClient> devtools_client_;
   bool devtools_creating_ = false;
   SIZE devtools_region_size_{};
+  RECT devtools_region_hole_{};
+  RECT devtools_page_bounds_{};
+  bool devtools_undocked_ = false;  // the host is a window of its own
+  std::string last_devtools_message_;
   bool reload_if_shown_ = false;  // UnloadForProfileChange
 
   bool loading_ = false;

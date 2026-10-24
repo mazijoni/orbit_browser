@@ -3021,9 +3021,8 @@ void AddZenSuite(Runner& r) {
     const RECT content = s->window->ContentRectPx();
     RECT host{};
     ::GetWindowRect(t->host(), &host);
-    r.Check(tools.right > tools.left && tools.right == content.right, "a pane at the right of the page area");
-    r.Check(host.right - host.left < content.right - content.left - (tools.right - tools.left) + 4,
-            "the page narrowed for it");
+    r.Check(tools.right > tools.left && tools.right == content.right, "over the page area");
+    r.Check(host.right - host.left < content.right - content.left - 100, "the page narrowed for them");
     return true;
   });
   r.Add("devtools: Inspect selects an element in them", [s, dev_tab, &r] {
@@ -3035,6 +3034,140 @@ void AddZenSuite(Runner& r) {
   }, [s, dev_tab] {
     return !(*dev_tab)->devtools_alive() && s->window->DevToolsRectPx().right == 0;
   });
+  // Docked Chrome DevTools: device toolbar, dock-side menu and close button
+  // (can_dock), Orbit's colour scheme, and every dock side.
+  auto probe = [](Tab* t, const char* js) {
+    t->devtools_browser()->GetMainFrame()->ExecuteJavaScript(
+        std::string("try { console.log('ORBIT-DT:probe:' + (") + js +
+            ")); } catch (e) { console.log('ORBIT-DT:probe:error ' + e); }", "", 0);
+  };
+  static const auto pick_side = [](Tab* t, const char* side, bool now) {
+    static ULONGLONG sent = 0;
+    if (!now && ::GetTickCount64() - sent < 700) return;
+    sent = ::GetTickCount64();
+    // What the menu runs: DevTools' own DockController.
+    t->devtools_browser()->GetMainFrame()->ExecuteJavaScript(
+        std::string("import(new URL('./ui/legacy/legacy.js', location.href).href).then((UI) => "
+                    "UI.DockController.DockController.instance().setDockSide('") + side +
+            "')).catch((e) => console.log('ORBIT-DT:probe:dock error ' + e))", "", 0);
+  };
+  r.Add("devtools: open docked, in Orbit's colour scheme", [s, dev_tab] {
+    s->window->HandleAccelerator(VK_F12, false, false, false);
+  }, [s, dev_tab, probe, app, &r] {
+    Tab* t = *dev_tab;
+    if (!t->devtools_browser()) return false;
+    const std::string url = t->devtools_browser()->GetMainFrame()->GetURL().ToString();
+    if (url.find("can_dock=true") == std::string::npos || t->devtools_browser()->IsLoading()) return false;
+    const std::string want = std::string("probe:") + (app->dark_mode() ? "dark" : "light") + ":bridge";
+    if (t->last_devtools_message() != want) {
+      static ULONGLONG asked = 0;
+      if (::GetTickCount64() - asked > 500) {
+        asked = ::GetTickCount64();
+        probe(t, "(matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') + "
+                 "(InspectorFrontendHost.__orbit ? ':bridge' : ':none')");
+      }
+      return false;
+    }
+    r.Check(true, "loaded with can_dock=true, the bridge in place, " + want.substr(6));
+    return true;
+  }, 20000);
+  r.Add("devtools: the dock-side menu moves them to the bottom", [dev_tab, &r] {
+    // Sent again until it sticks (the front-end may still be starting up).
+    pick_side(*dev_tab, "bottom", true);
+  }, [s, dev_tab, &r] {
+    if (GetDevToolsDock() != DevToolsDock::kBottom) pick_side(*dev_tab, "bottom", false);
+    if (GetDevToolsDock() != DevToolsDock::kBottom) return false;
+    const RECT page = s->window->DevToolsPageRectPx(), content = s->window->ContentRectPx();
+    if (!(page.bottom < content.bottom - 50)) return false;  // DevTools lay out, then say where the page goes
+    r.Check(page.top == content.top && std::abs(page.left - content.left) <= 2 &&
+                std::abs(page.right - content.right) <= 2,
+            "the page above them, full width");
+    return true;
+  }, 8000);
+  r.Add("... to the left", [dev_tab] {
+    // Sent again until it sticks (the front-end may still be starting up).
+    pick_side(*dev_tab, "left", true);
+  }, [s, dev_tab, &r] {
+    if (GetDevToolsDock() != DevToolsDock::kLeft) pick_side(*dev_tab, "left", false);
+    if (GetDevToolsDock() != DevToolsDock::kLeft) return false;
+    const RECT page = s->window->DevToolsPageRectPx(), content = s->window->ContentRectPx();
+    if (!(page.left > content.left + 50)) return false;
+    r.Check(std::abs(page.right - content.right) <= 2 && page.top == content.top, "the page right of them");
+    return true;
+  }, 8000);
+  r.Add("... into a window of their own", [dev_tab] {
+    // Sent again until it sticks (the front-end may still be starting up).
+    pick_side(*dev_tab, "undocked", true);
+  }, [s, dev_tab, &r] {
+    HWND host = (*dev_tab)->devtools_host();
+    if (GetDevToolsDock() != DevToolsDock::kUndocked) pick_side(*dev_tab, "undocked", false);
+    if (GetDevToolsDock() != DevToolsDock::kUndocked || !host || !::IsWindowVisible(host)) return false;
+    r.Check((::GetWindowLongPtrW(host, GWL_STYLE) & WS_CAPTION) == WS_CAPTION, "with a title bar");
+    r.Check(s->window->DevToolsRectPx().right == 0, "the page has the whole area");
+    return true;
+  }, 8000);
+  r.Add("... and back to the right", [dev_tab] {
+    // Sent again until it sticks (the front-end may still be starting up).
+    pick_side(*dev_tab, "right", true);
+  }, [s, dev_tab, &r] {
+    if (GetDevToolsDock() != DevToolsDock::kRight) pick_side(*dev_tab, "right", false);
+    if (GetDevToolsDock() != DevToolsDock::kRight) return false;
+    const RECT page = s->window->DevToolsPageRectPx(), content = s->window->ContentRectPx();
+    if (!(page.right < content.right - 50 && page.left == content.left)) return false;
+    HWND host = (*dev_tab)->devtools_host();
+    r.Check(true, "the page left of them again");
+    r.Check(host && (::GetWindowLongPtrW(host, GWL_STYLE) & WS_CAPTION) != WS_CAPTION, "docked (no title bar)");
+    return true;
+  }, 8000);
+  r.Add("devtools: their close button closes them", [dev_tab] {
+    (*dev_tab)->devtools_browser()->GetMainFrame()->ExecuteJavaScript("InspectorFrontendHost.closeWindow()", "", 0);
+  }, [s, dev_tab] { return !(*dev_tab)->devtools_alive() && s->window->DevToolsRectPx().right == 0; }, 8000);
+  // A link from another app while a video is fullscreen: the new tab shows
+  // in the normal window and the video leaves fullscreen.
+  struct Fs {
+    Tab* video = nullptr;
+    Tab* link = nullptr;
+    TestHttpServer server;
+  };
+  auto fs = std::make_shared<Fs>();
+  r.Add("fullscreen: a page goes fullscreen", [s, fs, &r] {
+    r.Check(fs->server.Start(), "test HTTP server listening");
+    fs->video = s->window->OpenTab(fs->server.Url(L"/fullscreen"), true);
+  }, [s, fs] {
+    if (fs->video->loading() || !fs->video->browser() || fs->video->record().title.empty()) return false;
+    if (s->window->content_fullscreen()) return true;
+    static ULONGLONG clicked = 0;
+    if (::GetTickCount64() - clicked > 1500) {
+      clicked = ::GetTickCount64();
+      CefMouseEvent e;
+      e.x = 60;
+      e.y = 60;
+      e.modifiers = 0;
+      CefRefPtr<CefBrowserHost> host = fs->video->browser()->GetHost();
+      host->SendMouseMoveEvent(e, false);
+      host->SendMouseClickEvent(e, MBT_LEFT, false, 1);
+      host->SendMouseClickEvent(e, MBT_LEFT, true, 1);
+    }
+    return false;
+  }, 15000);
+  r.Add("... a link from another app opens: the window comes back", [s, fs, &r] {
+    r.Check(s->window->chrome_hidden_for_test() && s->window->fullscreen_tab() == fs->video, "fullscreen before the link");
+    fs->link = s->window->OpenRoutedTab(TestUrl(L"t=FromApp"), true, /*external=*/true);
+  }, [s, fs, &r] {
+    if (s->window->content_fullscreen() || fs->video->record().title != L"fs-off") return false;
+    r.Check(s->window->active_tab() == fs->link, "the link's tab is shown");
+    r.Check(!s->window->chrome_hidden_for_test() && s->window->fullscreen_tab() == nullptr, "with the sidebar and toolbar");
+    r.Check(true, "the video page left fullscreen");
+    s->window->CloseTabShortcut(fs->link);
+    s->window->CloseTabShortcut(fs->video);
+    return true;
+  }, 10000);
+  r.Add("... (fullscreen test tabs closed)", [] {}, [s, fs] {
+    for (const auto& t : s->window->workspace()->tabs()) {
+      if (t.get() == fs->video || t.get() == fs->link) return false;
+    }
+    return true;
+  }, 10000);
   // Linked window spaces (instead of Zen's window sync).
   struct Linked {
     Workspace* home = nullptr;

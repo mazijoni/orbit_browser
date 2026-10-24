@@ -33,6 +33,8 @@ BrowserWindow* WindowFor(Tab* tab) {
 constexpr int kMenuSplitLink = MENU_ID_USER_FIRST + 1;
 constexpr int kMenuGlanceLink = MENU_ID_USER_FIRST + 2;
 constexpr int kMenuInspect = MENU_ID_USER_FIRST + 3;
+// Chrome's IDC_CONTENT_CONTEXT_INSPECTELEMENT (chrome_command_ids.h).
+constexpr int kChromeInspectElement = 50162;
 constexpr int kMenuNewTabLink = MENU_ID_USER_FIRST + 4;
 constexpr int kMenuCopyLink = MENU_ID_USER_FIRST + 5;
 constexpr int kMenuSearchSelection = MENU_ID_USER_FIRST + 6;
@@ -144,7 +146,16 @@ void BrowserClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr
       model->AddItem(kMenuSearchSelection, escaped);
     }
   }
-  // Every page can be inspected (DevTools, docked).
+  // Every page can be inspected (DevTools, docked). Chromium's own "Inspect"
+  // would open its DevTools in a separate Chromium window: Orbit's replaces it.
+  for (size_t i = model->GetCount(); i-- > 0;) {
+    std::wstring label = model->GetLabelAt(i).ToWString();
+    std::erase(label, L'&');
+    if (model->GetCommandIdAt(i) == kChromeInspectElement || label == L"Inspect") model->RemoveAt(i);
+  }
+  while (model->GetCount() > 0 && model->GetTypeAt(model->GetCount() - 1) == MENUITEMTYPE_SEPARATOR) {
+    model->RemoveAt(model->GetCount() - 1);
+  }
   model->AddSeparator();
   model->AddItem(kMenuInspect, "I&nspect");
 }
@@ -377,7 +388,7 @@ void BrowserClient::OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
 
 void BrowserClient::OnFullscreenModeChange(CefRefPtr<CefBrowser> browser, bool fullscreen) {
   Tab* tab = FindTab(browser->GetIdentifier());
-  if (BrowserWindow* w = WindowFor(tab)) w->SetContentFullscreen(fullscreen);
+  if (BrowserWindow* w = WindowFor(tab)) w->SetContentFullscreen(tab, fullscreen);
 }
 
 void BrowserClient::OnLoadingProgressChange(CefRefPtr<CefBrowser> browser, double progress) {

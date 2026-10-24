@@ -1,5 +1,8 @@
 #include "browser/tab.h"
 
+#include <cmath>
+#include <cstdio>
+
 #include "app/application.h"
 #include "browser/browser_client.h"
 #include "browser/profile.h"
@@ -7,6 +10,7 @@
 #include "include/cef_devtools_message_observer.h"
 #include "core/strings.h"
 #include "core/url_fixup.h"
+#include "persistence/store.h"
 #include "include/base/cef_callback.h"
 #include "include/cef_request_context.h"
 #include "include/wrapper/cef_closure_task.h"
@@ -21,6 +25,53 @@ constexpr wchar_t kHostProp[] = L"OrbitTab";
 // Chrome style gives extensions (Alloy has no extension system).
 constexpr cef_runtime_style_t kTabRuntimeStyle = CEF_RUNTIME_STYLE_CHROME;
 constexpr wchar_t kDevToolsHostClass[] = L"OrbitDevToolsHost";
+constexpr wchar_t kDevToolsForProp[] = L"OrbitDevToolsFor";  // the inspected browser's id
+
+DevToolsDock g_devtools_dock = DevToolsDock::kRight;
+bool g_devtools_dock_loaded = false;
+
+const wchar_t* DockName(DevToolsDock dock) {
+  switch (dock) {
+    case DevToolsDock::kLeft: return L"left";
+    case DevToolsDock::kBottom: return L"bottom";
+    case DevToolsDock::kUndocked: return L"undocked";
+    default: return L"right";
+  }
+}
+
+// Runs in the DevTools front-end (devtools://, loaded with can_dock=true so
+// it shows the device toolbar, the dock-side menu and the close button).
+// Orbit is its embedder: the requests docked Chrome answers itself come back
+// here as console messages.
+constexpr char kDevToolsBridge[] = R"js((() => {
+  const host = window.InspectorFrontendHost;
+  if (!host || host.__orbit) return;
+  host.__orbit = true;
+  const say = (m) => console.log('ORBIT-DT:' + m);
+  const unquote = (v) => (typeof v === 'string' ? v.replace(/^"|"$/g, '') : '');
+  // The side DevTools open on (their saved setting); a later choice in the
+  // dock-side menu wins over this answer if it comes late.
+  let chosen = false;
+  host.getPreferences((prefs) => {
+    let side = prefs && prefs.currentDockState;
+    if (!side) { try { side = localStorage.getItem('currentDockState'); } catch (e) {} }
+    side = unquote(side);
+    if (side && !chosen) say('side:' + side);
+  });
+  host.closeWindow = () => say('close');
+  host.setInspectedPageBounds = (b) => say('bounds:' + [b.x, b.y, b.width, b.height].map(Math.round).join(','));
+  host.setIsDocked = (docked, done) => { if (done) setTimeout(done, 0); };
+  const setPreference = host.setPreference.bind(host);
+  host.setPreference = (name, value) => {
+    if (name === 'currentDockState') {
+      chosen = true;
+      say('side:' + unquote(value));
+    }
+    return setPreference(name, value);
+  };
+})())js";
+
+
 
 LRESULT CALLBACK DevToolsHostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == WM_SIZE) {
@@ -32,11 +83,24 @@ LRESULT CALLBACK DevToolsHostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (msg == WM_ERASEBKGND) return 1;
   // CEF closes DevTools by posting WM_CLOSE to their top-level window (this
   // host, which is why it is an owned popup and not a child of the browser
-  // window); the tab destroys the host once DevTools have closed.
+  // window); the tab destroys the host once DevTools have closed. Undocked,
+  // the host has a title bar and its close button closes DevTools.
   if (msg == WM_CLOSE) {
+    const bool user_close = (::GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION &&
+                            ::IsWindowVisible(hwnd);
     ::ShowWindow(hwnd, SW_HIDE);
+    if (user_close) {
+      const int inspected = static_cast<int>(reinterpret_cast<intptr_t>(::GetPropW(hwnd, kDevToolsForProp)));
+      CefPostTask(TID_UI, base::BindOnce(
+                              [](int id) {
+                                Application* app = Application::Get();
+                                if (Tab* tab = app ? app->client()->FindTab(id) : nullptr) tab->CloseDevTools();
+                              },
+                              inspected));
+    }
     return 0;
   }
+  if (msg == WM_NCDESTROY) ::RemovePropW(hwnd, kDevToolsForProp);
   return ::DefWindowProcW(hwnd, msg, wp, lp);
 }
 
@@ -110,14 +174,45 @@ Tab::Tab(Workspace* workspace, TabRecord record)
 
 // The DevTools browser of one tab. It is not a tab: BrowserClient would close
 // it, so it has a client of its own that reports to the tab.
-class DevToolsClient : public CefClient, public CefLifeSpanHandler, public CefKeyboardHandler {
+class DevToolsClient : public CefClient,
+                       public CefLifeSpanHandler,
+                       public CefKeyboardHandler,
+                       public CefLoadHandler,
+                       public CefDisplayHandler {
  public:
   explicit DevToolsClient(Tab* tab) : tab_(tab) {}
   void Detach() { tab_ = nullptr; }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+  CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+  CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+  void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int) override {
+    if (tab_ && frame->IsMain()) tab_->OnDevToolsLoaded(frame);
+  }
+  bool OnConsoleMessage(CefRefPtr<CefBrowser> browser, cef_log_severity_t, const CefString& message,
+                        const CefString& source, int) override {
+    // Only the front-end's own page (the bridge); what inspected pages log is
+    // shown inside DevTools, never logged by this browser.
+    const std::string text = message.ToString();
+    if (!tab_ || text.rfind("ORBIT-DT:", 0) != 0) return false;
+    if (browser->GetMainFrame()->GetURL().ToString().rfind("devtools://devtools/", 0) != 0) return true;
+    tab_->OnDevToolsMessage(text.substr(9));
+    return true;
+  }
+  bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, const CefString& target_url, const CefString&,
+                     cef_window_open_disposition_t, bool, const CefPopupFeatures&, CefWindowInfo&,
+                     CefRefPtr<CefClient>&, CefBrowserSettings&, CefRefPtr<CefDictionaryValue>&, bool*) override {
+    // DevTools moved to their own window open a "toolbox" window for device
+    // emulation (AdvancedApp.openToolboxWindow); Orbit has none. Links they
+    // open (documentation, "Learn more") become a tab.
+    const std::wstring url = target_url.ToWString();
+    if (tab_ && (url.rfind(L"https://", 0) == 0 || url.rfind(L"http://", 0) == 0)) {
+      if (BrowserWindow* w = tab_->HostWindow()) w->OpenTab(url, true);
+    }
+    return true;
+  }
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
-    if (tab_) {
+    if (tab_ && !tab_->devtools_browser()) {
       tab_->OnDevToolsCreated(browser);
     } else {
       browser->GetHost()->CloseBrowser(true);
@@ -164,6 +259,9 @@ void Tab::ShowDevTools(BrowserWindow* window, const CefPoint* inspect_at) {
                                        ::GetModuleHandleW(nullptr), nullptr);
     devtools_window_ = window;
     devtools_region_size_ = {};
+    devtools_undocked_ = false;
+    ::SetPropW(devtools_host_, kDevToolsForProp,
+               reinterpret_cast<HANDLE>(static_cast<intptr_t>(browser_->GetIdentifier())));
   }
   if (!devtools_client_) devtools_client_ = new DevToolsClient(this);
   RECT rc;
@@ -184,15 +282,55 @@ void Tab::CloseDevTools() {
   if (w) w->OnDevToolsChanged(this);
 }
 
-void Tab::ShowDevToolsPane(const RECT& client, int corner_px) {
+void Tab::ShowDevToolsPane(const RECT& client, const RECT& page, int corner_px) {
   if (!devtools_host_ || !devtools_window_) return;
+  const bool undock = GetDevToolsDock() == DevToolsDock::kUndocked;
+  if (undock != devtools_undocked_) {
+    devtools_undocked_ = undock;
+    devtools_region_size_ = {};
+    devtools_region_hole_ = {};
+    devtools_page_bounds_ = {};  // they say again once docked
+    ::SetWindowRgn(devtools_host_, nullptr, FALSE);
+    if (undock) {
+      // A window of its own, as Chrome's undocked DevTools.
+      ::SetWindowLongPtrW(devtools_host_, GWLP_HWNDPARENT, 0);
+      ::SetWindowLongPtrW(devtools_host_, GWL_EXSTYLE, WS_EX_APPWINDOW);
+      ::SetWindowLongPtrW(devtools_host_, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN);
+      ::SetWindowTextW(devtools_host_, (L"DevTools - " + record_.url).c_str());
+      RECT owner;
+      ::GetWindowRect(devtools_window_->hwnd(), &owner);
+      const UINT dpi = ::GetDpiForWindow(devtools_window_->hwnd());
+      const int w = ::MulDiv(900, dpi, 96), h = ::MulDiv(700, dpi, 96);
+      ::SetWindowPos(devtools_host_, HWND_TOP, owner.left + ::MulDiv(80, dpi, 96), owner.top + ::MulDiv(60, dpi, 96), w, h,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    } else {
+      ::SetWindowLongPtrW(devtools_host_, GWL_STYLE, WS_POPUP | WS_CLIPCHILDREN);
+      ::SetWindowLongPtrW(devtools_host_, GWL_EXSTYLE, WS_EX_TOOLWINDOW);
+      ::SetWindowLongPtrW(devtools_host_, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(devtools_window_->hwnd()));
+      ::SetWindowPos(devtools_host_, nullptr, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+  }
+  if (undock) {
+    if (!::IsWindowVisible(devtools_host_)) ::ShowWindow(devtools_host_, SW_SHOWNOACTIVATE);
+    return;
+  }
   RECT r = client;  // the window's client coordinates, to the screen
   ::MapWindowPoints(devtools_window_->hwnd(), nullptr, reinterpret_cast<POINT*>(&r), 2);
   const SIZE size{r.right - r.left, r.bottom - r.top};
-  if (size.cx != devtools_region_size_.cx || size.cy != devtools_region_size_.cy) {
+  // The page shows through a hole where DevTools keep its place.
+  const RECT hole{page.left - client.left, page.top - client.top, page.right - client.left, page.bottom - client.top};
+  if (size.cx != devtools_region_size_.cx || size.cy != devtools_region_size_.cy ||
+      !::EqualRect(&hole, &devtools_region_hole_)) {
     devtools_region_size_ = size;
+    devtools_region_hole_ = hole;
     HRGN region = corner_px > 0 ? ::CreateRoundRectRgn(0, 0, size.cx + 1, size.cy + 1, corner_px * 2, corner_px * 2)
-                                : nullptr;
+                                : ::CreateRectRgn(0, 0, size.cx, size.cy);
+    if (hole.right > hole.left && hole.bottom > hole.top) {
+      HRGN cut = ::CreateRectRgn(hole.left, hole.top, hole.right, hole.bottom);
+      ::CombineRgn(region, region, cut, RGN_DIFF);
+      ::DeleteObject(cut);
+    }
     ::SetWindowRgn(devtools_host_, region, ::IsWindowVisible(devtools_host_));
   }
   ::SetWindowPos(devtools_host_, nullptr, r.left, r.top, size.cx, size.cy,
@@ -206,6 +344,8 @@ void Tab::HideDevToolsPane() {
 void Tab::OnDevToolsCreated(CefRefPtr<CefBrowser> browser) {
   devtools_creating_ = false;
   devtools_browser_ = browser;
+  devtools_color_session_ = nullptr;
+  ApplyWebColorScheme();  // DevTools' "System preference" theme follows Orbit's
   if (devtools_host_) {
     if (HWND child = browser->GetHost()->GetWindowHandle()) {
       RECT rc;
@@ -231,6 +371,9 @@ void Tab::OnDevToolsClosing() {
 
 void Tab::OnDevToolsClosed() {
   devtools_browser_ = nullptr;
+  devtools_page_bounds_ = {};
+  devtools_region_hole_ = {};
+  devtools_color_session_ = nullptr;
   devtools_creating_ = false;
   OnDevToolsClosing();
   BrowserWindow* w = devtools_window_;
@@ -572,18 +715,87 @@ class KeepDevToolsSession : public CefDevToolsMessageObserver {
 }  // namespace
 
 void Tab::ApplyWebColorScheme() {
-  if (!browser_) return;
-  if (!color_scheme_session_) {
-    color_scheme_session_ = browser_->GetHost()->AddDevToolsMessageObserver(new KeepDevToolsSession());
+  auto apply = [](CefRefPtr<CefBrowser> browser, CefRefPtr<CefRegistration>& session) {
+    if (!browser) return;
+    if (!session) session = browser->GetHost()->AddDevToolsMessageObserver(new KeepDevToolsSession());
+    CefRefPtr<CefDictionaryValue> feature = CefDictionaryValue::Create();
+    feature->SetString("name", "prefers-color-scheme");
+    feature->SetString("value", Application::Get()->dark_mode() ? "dark" : "light");
+    CefRefPtr<CefListValue> features = CefListValue::Create();
+    features->SetDictionary(0, feature);
+    CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
+    params->SetList("features", features);
+    browser->GetHost()->ExecuteDevToolsMethod(0, "Emulation.setEmulatedMedia", params);
+  };
+  apply(browser_, color_scheme_session_);
+  apply(devtools_browser_, devtools_color_session_);
+}
+
+void Tab::OnDevToolsLoaded(CefRefPtr<CefFrame> frame) {
+  const std::string url = frame->GetURL().ToString();
+  if (url.rfind("devtools://devtools/", 0) != 0) return;
+  if (url.find("can_dock=true") == std::string::npos) {
+    // Chrome loads docked DevTools with can_dock=true; CEF's own front-end
+    // URL lacks it, which hides the device toolbar, the dock-side menu and
+    // the close button.
+    frame->LoadURL(url + (url.find('?') == std::string::npos ? "?" : "&") + "can_dock=true");
+    return;
   }
-  CefRefPtr<CefDictionaryValue> feature = CefDictionaryValue::Create();
-  feature->SetString("name", "prefers-color-scheme");
-  feature->SetString("value", Application::Get()->dark_mode() ? "dark" : "light");
-  CefRefPtr<CefListValue> features = CefListValue::Create();
-  features->SetDictionary(0, feature);
-  CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
-  params->SetList("features", features);
-  browser_->GetHost()->ExecuteDevToolsMethod(0, "Emulation.setEmulatedMedia", params);
+  frame->ExecuteJavaScript(kDevToolsBridge, url, 0);
+}
+
+void Tab::OnDevToolsMessage(const std::string& message) {
+  last_devtools_message_ = message;
+  if (message == "close") {
+    CefPostTask(TID_UI, base::BindOnce(
+                            [](int id) {
+                              Application* app = Application::Get();
+                              if (Tab* tab = app ? app->client()->FindTab(id) : nullptr) tab->CloseDevTools();
+                            },
+                            browser_ ? browser_->GetIdentifier() : -1));
+  } else if (message.rfind("bounds:", 0) == 0) {
+    // CSS pixels of the DevTools page (zoom 1), to the window's pixels.
+    int v[4] = {};
+    if (std::sscanf(message.c_str() + 7, "%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3]) != 4 || !devtools_window_) return;
+    const double scale = ::GetDpiForWindow(devtools_window_->hwnd()) / 96.0;
+    const auto at = [scale](int css) { return static_cast<LONG>(std::lround(css * scale)); };
+    const RECT bounds{at(v[0]), at(v[1]), at(v[0] + std::max(0, v[2])), at(v[1] + std::max(0, v[3]))};
+    if (::EqualRect(&bounds, &devtools_page_bounds_)) return;
+    devtools_page_bounds_ = bounds;
+    devtools_window_->OnDevToolsChanged(this);
+  } else if (message.rfind("side:", 0) == 0) {
+    const std::string side = message.substr(5);
+    DevToolsDock dock = DevToolsDock::kRight;
+    if (side == "left") dock = DevToolsDock::kLeft;
+    else if (side == "bottom") dock = DevToolsDock::kBottom;
+    else if (side == "undocked") dock = DevToolsDock::kUndocked;
+    else if (side != "right") return;
+    if (dock != GetDevToolsDock()) SetDevToolsDock(dock);
+  }
+}
+
+DevToolsDock GetDevToolsDock() {
+  if (!g_devtools_dock_loaded) {
+    g_devtools_dock_loaded = true;
+    if (Application* app = Application::Get()) {
+      const std::wstring v = app->store().GetPref(Store::kGlobalScope, L"devtools_dock").value_or(L"right");
+      for (DevToolsDock d : {DevToolsDock::kRight, DevToolsDock::kLeft, DevToolsDock::kBottom, DevToolsDock::kUndocked}) {
+        if (v == DockName(d)) g_devtools_dock = d;
+      }
+    }
+  }
+  return g_devtools_dock;
+}
+
+void SetDevToolsDock(DevToolsDock dock) {
+  g_devtools_dock = dock;
+  g_devtools_dock_loaded = true;
+  Application* app = Application::Get();
+  if (!app) return;
+  app->store().SetPref(Store::kGlobalScope, L"devtools_dock", DockName(dock));
+  for (const auto& w : app->windows()) {
+    if (!w->closing()) w->OnDevToolsDockChanged();
+  }
 }
 
 void Tab::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
