@@ -363,6 +363,7 @@ const pages = [
                     choice('<strong>NO</strong>, start fresh.', false, next), file, status);
    }},
   {title: 'Make Orbit your default?', text: ['Links from other apps will open in Orbit. You can always change this later.'],
+   skip: () => state.defaultBrowser,
    render() {
      content.append(choice('<strong>YES</strong>, make Orbit default.', false, async () => { await orbitAction('/api/default-browser'); next(); }),
                     choice('<strong>NO</strong>, still exploring my options.', false, next));

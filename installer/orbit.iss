@@ -39,3 +39,11 @@ Source: "{#StageDir}\*"; DestDir: "{tmp}\orbit-payload"; Flags: recursesubdirs c
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM orbit.exe"; Flags: runhidden waituntilterminated
 Filename: "{tmp}\orbit-payload\orbit.exe"; Parameters: "--install --quiet"; StatusMsg: "Installing Orbit..."; Flags: waituntilterminated runhidden
 Filename: "{localappdata}\Programs\Orbit\orbit.exe"; Description: "Start Orbit"; Flags: nowait postinstall skipifsilent
+; An update started from Orbit's Settings (/SILENT /relaunch=1) opens Orbit again.
+Filename: "{localappdata}\Programs\Orbit\orbit.exe"; Flags: nowait; Check: Relaunch
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;

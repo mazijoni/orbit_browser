@@ -31,10 +31,12 @@ target_link_libraries(orbit_core PUBLIC sqlite3 psapi bcrypt crypt32)
 # which provides the Windows sandbox for all Chromium sub-processes.
 add_library(orbit SHARED
   app/application.cpp
+  app/crash_log.cpp
   app/installer.cpp
   app/main.cpp
   app/self_test.cpp
   app/test_http_server.cpp
+  app/updater.cpp
   app/orbit_app.cpp
   app/orbit.rc
   browser/browser_client.cpp
@@ -80,7 +82,10 @@ target_link_libraries(orbit PRIVATE
   libcef_dll_wrapper
   "${CEF_LIB_RELEASE}"
   ${CEF_STANDARD_LIBS}
-  comctl32 d2d1 dwrite dwmapi oleaut32 shell32 ole32 propsys uiautomationcore user32 uxtheme dbghelp runtimeobject)
+  comctl32 d2d1 dwrite dwmapi oleaut32 shell32 ole32 propsys uiautomationcore user32 uxtheme dbghelp runtimeobject shlwapi winhttp bcrypt)
+# Release keeps a PDB (not shipped; CI uploads it) so crash logs' module
+# offsets and minidumps can be read.
+target_link_options(orbit PRIVATE "$<$<CONFIG:Release>:/DEBUG;/OPT:REF;/OPT:ICF>")
 
 # Assemble a runnable layout in bin/: orbit.exe + orbit.dll + CEF runtime.
 add_executable(stamp_resources "${CMAKE_SOURCE_DIR}/tools/stamp_resources.cpp")

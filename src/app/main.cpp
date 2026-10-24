@@ -14,8 +14,10 @@
 #include <mutex>
 
 #include "app/application.h"
+#include "app/crash_log.h"
 #include "app/installer.h"
 #include "app/orbit_app.h"
+#include "app/updater.h"
 #include "core/log.h"
 #include "core/strings.h"
 #include "include/cef_app.h"
@@ -87,6 +89,7 @@ int RunWinMain(HINSTANCE instance, LPWSTR, int, void* sandbox_info, cef_version_
   if (command_line->HasSwitch("orbit-verbose-log")) {
     orbit::log::SetMinLevel(orbit::log::Level::kVerbose);
   }
+  orbit::crash_log::Install(user_data);
 
   CefSettings settings;
   CefString(&settings.root_cache_path) = user_data.wstring();
@@ -107,6 +110,7 @@ int RunWinMain(HINSTANCE instance, LPWSTR, int, void* sandbox_info, cef_version_
   if (primary && !application->Initialize()) {
     ::MessageBoxW(nullptr, L"Orbit could not open its profile database.", L"Orbit",
                   MB_OK | MB_ICONERROR);
+    orbit::crash_log::MarkCleanExit();
     return 1;
   }
 
@@ -116,8 +120,13 @@ int RunWinMain(HINSTANCE instance, LPWSTR, int, void* sandbox_info, cef_version_
     const int code = CefGetExitCode();
     ORBIT_LOG_INFO("CefInitialize returned false (exit code %d)", code);
     application.reset();
+    orbit::crash_log::MarkCleanExit();
     return code;
   }
+
+  // Chromium may install its own unhandled-exception filter; put Orbit's
+  // (which writes the minidump) back on top.
+  orbit::crash_log::Install(user_data);
 
   if (!primary) {
     // Should not happen: CEF's process singleton normally catches this first.
@@ -131,6 +140,9 @@ int RunWinMain(HINSTANCE instance, LPWSTR, int, void* sandbox_info, cef_version_
   application.reset();
   CefShutdown();
   ORBIT_LOG_INFO("clean shutdown");
+  orbit::crash_log::MarkCleanExit();
+  // "Restart to update": the setup starts once every Orbit process is gone.
+  orbit::updater::RunPendingInstaller();
   orbit::log::SetSink(nullptr);
   if (g_log_file) std::fclose(g_log_file);
   ::CoUninitialize();

@@ -5,10 +5,6 @@
 
 #include <windows.h>
 
-#include <crtdbg.h>
-#include <csignal>
-#include <dbghelp.h>
-
 #include <algorithm>
 #include <cstdio>
 #include <cwctype>
@@ -19,7 +15,9 @@
 #include <vector>
 
 #include "app/application.h"
+#include "app/installer.h"
 #include "app/test_http_server.h"
+#include "app/updater.h"
 #include "browser/downloads.h"
 #include "browser/password_vault.h"
 #include "browser/permissions.h"
@@ -190,6 +188,8 @@ class SetCookieDone : public CefSetCookieCallback {
 };
 
 // --- Suites ----------------------------------------------------------------
+
+std::string DescribeWindows();  // every visible window of this process (diagnostics)
 
 void AddBasicSuite(Runner& r) {
   Application* app = Application::Get();
@@ -1113,6 +1113,41 @@ void AddZenSuite(Runner& r) {
   r.Add("window exists", [s, app] {
     s->window = FirstWindowOf(app->profiles().front().get());
   }, [s] { return s->window != nullptr && s->window->active_tab() != nullptr; });
+
+  r.Add("update versions compare as numbers", [&r] {
+    r.Check(updater::IsNewer("0.1.10", "0.1.9"), "0.1.10 is newer than 0.1.9");
+    r.Check(updater::IsNewer("v0.2.0", "0.1.3"), "v0.2.0 is newer than 0.1.3");
+    r.Check(!updater::IsNewer("0.1.3", "0.1.3"), "the same version is not newer");
+    r.Check(!updater::IsNewer("0.1.2", "0.1.3"), "an older version is not newer");
+    r.Check(updater::IsNewer("1", "0.9.9"), "a short version compares");
+  }, [] { return true; });
+  r.Add("Settings shows the update and default-browser state", [s] {
+    s->tab = s->window->OpenTab(L"orbit://settings/", true);
+  }, [s, &r] {
+    if (s->tab->loading() || !s->tab->browser()) return false;
+    const std::wstring& t = s->tab->record().title;
+    if (t.rfind(L"STATE:", 0) != 0) {
+      s->tab->browser()->GetMainFrame()->ExecuteJavaScript(
+          "{const u=document.getElementById('updateState'),d=document.getElementById('defaultState');"
+          "if(u&&d&&u.textContent!=='Orbit'&&d.textContent!=='Checking…')"
+          "document.title='STATE:'+u.textContent+'|'+d.textContent+'|'+document.getElementById('makeDefault').hidden;}",
+          "", 0);
+      return false;
+    }
+    r.Log("  info " + N(t));
+    r.Check(t.find(L"Orbit ") != std::wstring::npos, "the update line names Orbit's version");
+    const bool is_default = installer::IsDefaultBrowser();
+    r.Check((t.find(L"|true") != std::wstring::npos) == is_default,
+            "the Make default button is hidden exactly when Orbit is the default");
+    s->window->CloseTabShortcut(s->tab);
+    return true;
+  }, 15000);
+  r.Add("update check answers (GitHub, informational)", [] { updater::Check(false); }, [&r] {
+    const updater::Status u = updater::Current();
+    if (u.state == updater::State::kChecking) return false;
+    r.Log(std::string("  info update state ") + updater::StateName(u.state) + " latest '" + u.latest + "' " + u.error);
+    return true;
+  }, 30000);
 
   r.Add("load a page", [s] {
     s->tab = s->window->active_tab();
@@ -3123,9 +3158,9 @@ void AddZenSuite(Runner& r) {
     pp->opener = s->window->OpenTab(pp->server.Url(L"/popupbtn"), true);
   }, [s, pp, &r] {
     if (pp->opener->loading() || pp->opener->record().title != L"popupbtn" || !pp->opener->browser()) return false;
-    static bool clicked = false;
-    if (!clicked) {
-      clicked = true;
+    static ULONGLONG clicked = 0;
+    if (!s->window->glance_tab() && ::GetTickCount64() - clicked > 1500) {  // (again, if a click went nowhere)
+      clicked = ::GetTickCount64();
       CefMouseEvent e;
       e.x = 60;
       e.y = 60;
@@ -3145,6 +3180,206 @@ void AddZenSuite(Runner& r) {
     r.Check(app->windows().size() == pp->windows, "no extra Orbit window");
     s->window->glance_tab()->browser()->GetMainFrame()->ExecuteJavaScript("window.close()", "", 0);
   }, [s] { return s->window->glance_tab() == nullptr; }, 10000);
+  // A provider's sign-in popup that closes itself on submit (Sign in with
+  // Google on x.com), from a tab and from an Essential.
+  auto sign_in = [s, pp](bool essential) {
+    return [s, pp, essential] {
+      pp->opener = s->window->OpenTab(pp->server.Url(L"/popupbtn?signin"), true);
+      if (essential) s->window->AddToEssentials(pp->opener);
+    };
+  };
+  for (const bool essential : {false, true}) {
+    r.Add(std::string("sign-in popup closing itself on submit") + (essential ? " (from an Essential)" : ""),
+          sign_in(essential), [s, pp, &r] {
+      static int stage[2] = {0, 0};
+      int& st = stage[s->window->IsEssential(pp->opener) ? 1 : 0];
+      static ULONGLONG last_click = 0;
+      if (st == 1 && ::GetTickCount64() - last_click > 1500) {
+        bool open = false;
+        for (const auto& t : s->window->workspace()->tabs()) open = open || t->record().title == L"signin";
+        if (!open) st = 0;  // the click went nowhere: again
+      }
+      if (st == 0) {
+        if (pp->opener->loading() || pp->opener->record().title != L"popupbtn" || !pp->opener->browser()) return false;
+        last_click = ::GetTickCount64();
+        CefMouseEvent e;
+        e.x = 60;
+        e.y = 60;
+        e.modifiers = 0;
+        CefRefPtr<CefBrowserHost> host = pp->opener->browser()->GetHost();
+        host->SendMouseMoveEvent(e, false);
+        host->SendMouseClickEvent(e, MBT_LEFT, false, 1);
+        host->SendMouseClickEvent(e, MBT_LEFT, true, 1);
+        st = 1;
+        return false;
+      }
+      // Find the sign-in page among the window's tabs (glance or tab).
+      Tab* popup = nullptr;
+      for (const auto& t : s->window->workspace()->tabs()) {
+        if (t->record().title == L"signin" && t->browser() && !t->loading()) popup = t.get();
+      }
+      if (st == 1) {
+        if (!popup) return false;
+        popup->browser()->GetMainFrame()->ExecuteJavaScript(
+            "document.getElementById('p').value='hunter2';document.getElementById('f').requestSubmit();", "", 0);
+        st = 2;
+        return false;
+      }
+      if (popup) return false;  // closes itself
+      r.Check(true, "the popup closed itself and Orbit is still running");
+      return true;
+    }, 20000);
+  }
+  r.Add("... and the opener is still fine", [s, pp, &r] {
+    r.Check(pp->opener->browser() != nullptr, "the opener page is alive");
+    s->window->RemoveFromEssentials(pp->opener);
+  });
+  r.Add("a sign-in form that navigates after submit (Chromium's password manager)", [s, pp] {
+    pp->opener = s->window->OpenTab(pp->server.Url(L"/login-nav"), true);
+  }, [s, pp, &r] {
+    static int st = 0;
+    static ULONGLONG typed_at = 0;
+    if (st == 1 && pp->opener->record().title == L"login-nav" && ::GetTickCount64() - typed_at > 4000) {
+      st = 0;  // the keys went nowhere (focus): type again
+      pp->opener->Navigate(pp->server.Url(L"/login-nav"));
+      return false;
+    }
+    if (st == 0) {
+      if (pp->opener->loading() || pp->opener->record().title != L"login-nav" || !pp->opener->browser()) return false;
+      typed_at = ::GetTickCount64();
+      // Typed for real (Chromium's password manager ignores values set by script).
+      CefRefPtr<CefBrowserHost> host = pp->opener->browser()->GetHost();
+      auto click = [&](int x, int y) {
+        CefMouseEvent m;
+        m.x = x;
+        m.y = y;
+        m.modifiers = 0;
+        host->SendMouseClickEvent(m, MBT_LEFT, false, 1);
+        host->SendMouseClickEvent(m, MBT_LEFT, true, 1);
+      };
+      auto type = [&](const std::wstring& text) {
+        for (wchar_t c : text) {
+          CefKeyEvent k;
+          k.type = KEYEVENT_CHAR;
+          k.windows_key_code = c;
+          k.character = c;
+          k.unmodified_character = c;
+          host->SendKeyEvent(k);
+        }
+      };
+      host->SetFocus(true);
+      click(50, 19);
+      type(L"someone@gmail.com");
+      click(220, 19);
+      type(L"hunter2");
+      CefKeyEvent enter;
+      enter.type = KEYEVENT_RAWKEYDOWN;
+      enter.windows_key_code = VK_RETURN;
+      enter.native_key_code = 0x1C0001;
+      host->SendKeyEvent(enter);
+      enter.type = KEYEVENT_CHAR;
+      enter.character = enter.unmodified_character = L'\r';
+      host->SendKeyEvent(enter);
+      enter.type = KEYEVENT_KEYUP;
+      host->SendKeyEvent(enter);
+      st = 1;
+      return false;
+    }
+    if (pp->opener->record().title != L"SignedIn" || pp->opener->loading()) return false;
+    static ULONGLONG t0 = ::GetTickCount64();
+    static bool logged = false;
+    if (!logged) { logged = true; r.Log("  info signed in; windows: " + DescribeWindows()); }
+    if (::GetTickCount64() - t0 < 4000) return false;  // time for any save-password UI to appear
+    r.Check(DescribeWindows().find("Chrome_WidgetWin_1 'Save password") == std::string::npos,
+            "no Chromium save-password dialog (Orbit's own toast instead)");
+    r.Check(true, "still running after the sign-in navigated");
+    passwords::ClearPendingOffer();
+    return true;
+  }, 20000);
+  // Sign in with Google on x.com, as it really goes: typed password and
+  // Enter in the popup (a glance), the popup posts and navigates, messages the
+  // opener and closes itself, and the opener navigates.
+  r.Add("sign-in popup typed for real: Enter, post, message, close", [s, pp] {
+    pp->opener = s->window->OpenTab(pp->server.Url(L"/popupbtn?signinnav"), true);
+  }, [s, pp, &r] {
+    static int st = 0;
+    static ULONGLONG at = 0;
+    Tab* g = s->window->glance_tab();
+    if (st == 0) {
+      if (pp->opener->loading() || pp->opener->record().title != L"popupbtn" || !pp->opener->browser()) return false;
+      if (g && g->record().title == L"signin-nav" && g->browser() && !g->loading()) {
+        st = 1;
+        return false;
+      }
+      if (::GetTickCount64() - at < 1500) return false;
+      at = ::GetTickCount64();
+      CefMouseEvent e;
+      e.x = 60;
+      e.y = 60;
+      e.modifiers = 0;
+      CefRefPtr<CefBrowserHost> host = pp->opener->browser()->GetHost();
+      host->SendMouseMoveEvent(e, false);
+      host->SendMouseClickEvent(e, MBT_LEFT, false, 1);
+      host->SendMouseClickEvent(e, MBT_LEFT, true, 1);
+      return false;
+    }
+    if (st == 1) {
+      if (!g || !g->browser()) return false;
+      at = ::GetTickCount64();
+      CefRefPtr<CefBrowserHost> host = g->browser()->GetHost();
+      auto click = [&](int x, int y) {
+        CefMouseEvent m;
+        m.x = x;
+        m.y = y;
+        m.modifiers = 0;
+        host->SendMouseClickEvent(m, MBT_LEFT, false, 1);
+        host->SendMouseClickEvent(m, MBT_LEFT, true, 1);
+      };
+      auto type = [&](const std::wstring& text) {
+        for (wchar_t c : text) {
+          CefKeyEvent k;
+          k.type = KEYEVENT_CHAR;
+          k.windows_key_code = c;
+          k.character = c;
+          k.unmodified_character = c;
+          host->SendKeyEvent(k);
+        }
+      };
+      host->SetFocus(true);
+      click(50, 19);
+      type(L"new.person@gmail.com");
+      click(220, 19);
+      type(L"correct horse");
+      CefKeyEvent enter;
+      enter.type = KEYEVENT_RAWKEYDOWN;
+      enter.windows_key_code = VK_RETURN;
+      enter.native_key_code = 0x1C0001;
+      host->SendKeyEvent(enter);
+      enter.type = KEYEVENT_CHAR;
+      enter.character = enter.unmodified_character = L'\r';
+      host->SendKeyEvent(enter);
+      enter.type = KEYEVENT_KEYUP;
+      host->SendKeyEvent(enter);
+      st = 2;
+      return false;
+    }
+    if (st == 2) {
+      // The keys went nowhere (focus): type again.
+      if (g && g->record().title == L"signin-nav" && ::GetTickCount64() - at > 4000) st = 1;
+      if (g || pp->opener->record().title != L"Welcome" || pp->opener->loading()) return false;
+      r.Log("  info signed in; windows: " + DescribeWindows());
+      at = ::GetTickCount64();
+      st = 3;
+      return false;
+    }
+    if (::GetTickCount64() - at < 4000) return false;  // time for any prompt or late close
+    r.Check(Application::Get()->windows().size() >= 1 && !s->window->closing(), "Orbit's window is still open");
+    r.Check(pp->opener->browser() != nullptr, "the opener is alive and signed in");
+    r.Check(DescribeWindows().find("Chrome_WidgetWin_1 'Save password") == std::string::npos,
+            "no Chromium save-password dialog");
+    passwords::ClearPendingOffer();
+    return true;
+  }, 30000);
   // Saving a new login after sign-in.
   struct Login {
     Tab* tab = nullptr;
@@ -3567,65 +3802,8 @@ void AddStoreInstallSuite(Runner& r) {
 
 bool IsActive() { return g_active; }
 
-// Self-test runs only: a crash inside a window procedure ends the process
-// with STATUS_FATAL_USER_CALLBACK_EXCEPTION and no report; log the faulting
-// frames (resolved through the PDB) so the cause is visible in orbit.log.
-void LogStack() {
-  static bool once = false;
-  if (once) return;
-  once = true;
-  HANDLE process = ::GetCurrentProcess();
-  ::SymSetOptions(::SymGetOptions() | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
-  ::SymInitialize(process, nullptr, TRUE);
-  void* frames[24];
-  const USHORT n = ::RtlCaptureStackBackTrace(0, 24, frames, nullptr);
-  alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + 256];
-  for (USHORT i = 0; i < n; ++i) {
-    auto* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
-    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
-    symbol->MaxNameLen = 255;
-    DWORD64 displacement = 0;
-    IMAGEHLP_LINE64 line{sizeof(line)};
-    DWORD line_displacement = 0;
-    const DWORD64 address = reinterpret_cast<DWORD64>(frames[i]);
-    const bool named = ::SymFromAddr(process, address, &displacement, symbol);
-    const bool lined = ::SymGetLineFromAddr64(process, address, &line_displacement, &line);
-    ORBIT_LOG_ERROR("selftest:   #%u %s %s:%lu", i, named ? symbol->Name : "?",
-                    lined ? line.FileName : "", lined ? line.LineNumber : 0ul);
-  }
-}
-
-LONG CALLBACK LogFatalException(EXCEPTION_POINTERS* info) {
-  const DWORD code = info->ExceptionRecord->ExceptionCode;
-  if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_STACK_OVERFLOW &&
-      code != EXCEPTION_ILLEGAL_INSTRUCTION && code != 0xC0000409 /* fail fast */) {
-    return EXCEPTION_CONTINUE_SEARCH;
-  }
-  ORBIT_LOG_ERROR("selftest: exception 0x%08lx at %p", code, info->ExceptionRecord->ExceptionAddress);
-  LogStack();
-  return EXCEPTION_CONTINUE_SEARCH;
-}
-
-// Debug builds: a failed CRT/STL assertion (e.g. a bad iterator) calls
-// abort(); log its message and where it happened.
-int LogCrtReport(int type, char* message, int* result) {
-  if (type == _CRT_WARN) return FALSE;
-  ORBIT_LOG_ERROR("selftest: CRT report: %s", message ? message : "");
-  LogStack();
-  *result = 0;
-  return FALSE;
-}
-
-void LogAbort(int) {
-  ORBIT_LOG_ERROR("selftest: abort()");
-  LogStack();
-}
-
 void Start(const std::wstring& suite) {
   g_active = true;
-  ::AddVectoredExceptionHandler(1, &LogFatalException);
-  _CrtSetReportHook2(_CRT_RPTHOOK_INSTALL, &LogCrtReport);
-  std::signal(SIGABRT, &LogAbort);
   g_runner = new Runner(suite);  // lives until process exit
   if (suite == L"basic") {
     AddBasicSuite(*g_runner);

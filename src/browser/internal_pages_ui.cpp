@@ -393,6 +393,16 @@ InternalResponse SettingsPage(const InternalRequest& req) {
     </div>
     <button id="clear" class="danger">Clear data for this profile</button> <span id="cleared" class="muted"></span>
   </div>
+  <h2>Updates</h2>
+  <div class="card">
+    <div style="display:flex;gap:12px;align-items:center">
+      <div style="flex:1"><div id="updateState">Orbit</div><div class="muted" id="updateDetail"></div></div>
+      <button id="updateCheck">Check for updates</button>
+      <button id="updateDownload" class="primary" hidden>Download update</button>
+      <button id="updateInstall" class="primary" hidden>Restart to update</button>
+    </div>
+    <div class="row" style="padding-left:0"><label class="grow" for="updateAutoCheck">Check for updates automatically (once a day)</label><input type="checkbox" id="updateAutoCheck"></div>
+  </div>
   <h2>About</h2>
   <div class="card" id="about"></div>
 </main>)html";
@@ -463,7 +473,8 @@ async function set(key, value) {
                            ['compactFlash', 'compact_flash'], ['searchSuggestions', 'search_suggestions'],
                            ['ctrlTabWithin', 'ctrl_tab_ignore_essentials'],
                            ['continueLeftOff', 'continue_where_left_off'],
-                           ['autofillPasswords', 'autofill_passwords']]) {
+                           ['autofillPasswords', 'autofill_passwords'],
+                           ['updateAutoCheck', 'update_auto_check']]) {
     const box = document.getElementById(id);
     box.checked = s[id];
     box.addEventListener('change', () => set(key, box.checked ? '1' : '0'));
@@ -684,6 +695,36 @@ async function set(key, value) {
   externalSel.onchange = saveRoutes;
   document.getElementById('newRoute').onclick = () => { routing.routes.push({match: 'contains', reference: '', space: 0}); drawRoutes(); };
   drawRoutes();
+  // Updates: GitHub releases (app/updater.*).
+  let updatePoll = null;
+  const drawUpdate = async () => {
+    const u = await (await fetch('/api/update')).json();
+    const state = document.getElementById('updateState'), detail = document.getElementById('updateDetail');
+    const show = (id, on) => { document.getElementById(id).hidden = !on; };
+    const busy = u.state === 'checking' || u.state === 'downloading';
+    show('updateCheck', u.state !== 'available' && u.state !== 'ready' && !busy);
+    show('updateDownload', u.state === 'available' || (u.state === 'error' && !!u.latest && u.latest !== u.current));
+    show('updateInstall', u.state === 'ready');
+    detail.textContent = '';
+    if (u.state === 'checking') state.textContent = 'Checking for updates…';
+    else if (u.state === 'up-to-date') state.textContent = 'Orbit ' + u.current + ' is up to date';
+    else if (u.state === 'available') state.textContent = 'Orbit ' + u.latest + ' is available (you have ' + u.current + ')';
+    else if (u.state === 'downloading') state.textContent = 'Downloading Orbit ' + u.latest + '… ' + u.progress + '%';
+    else if (u.state === 'ready') { state.textContent = 'Orbit ' + u.latest + ' is ready'; detail.textContent = 'Orbit closes, installs the update and opens again with your tabs.'; }
+    else if (u.state === 'error') { state.textContent = 'Could not update'; detail.textContent = u.error; }
+    else state.textContent = 'Orbit ' + u.current;
+    if (busy && !updatePoll) updatePoll = setInterval(drawUpdate, 700);
+    if (!busy && updatePoll) { clearInterval(updatePoll); updatePoll = null; }
+  };
+  const updateAction = (name) => async () => {
+    try { await orbitAction('/api/' + name, {}); } catch (e) {}
+    setTimeout(drawUpdate, 100);
+  };
+  document.getElementById('updateCheck').onclick = updateAction('update-check');
+  document.getElementById('updateDownload').onclick = updateAction('update-download');
+  document.getElementById('updateInstall').onclick = updateAction('update-install');
+  if (s.private) document.querySelectorAll('#updateCheck,#updateDownload,#updateInstall').forEach((b) => b.disabled = true);
+  drawUpdate();
   document.getElementById('about').append(
     el('div', {}, 'Orbit ' + s.version),
     el('div', {class: 'muted'}, 'Engine: Chromium Embedded Framework ' + s.engine),

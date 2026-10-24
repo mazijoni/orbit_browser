@@ -13,6 +13,7 @@
 
 #include "app/application.h"
 #include "app/installer.h"
+#include "app/updater.h"
 #include "browser/browser_client.h"
 #include "browser/downloads.h"
 #include "browser/extension_bridge.h"
@@ -465,9 +466,29 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
     d->SetBool("private", profile->is_private());
     d->SetString("version", ORBIT_VERSION);
     d->SetBool("defaultBrowser", installer::IsDefaultBrowser());
+    d->SetBool("updateAutoCheck", pref_on(L"update_auto_check", true));
     d->SetString("engine", CEF_VERSION);
     d->SetString("dataDir", profile->is_private() ? L"(in memory)" : profile->data_dir().wstring());
     return Json(d);
+  }
+  if (api == L"update") {
+    // Read-only state; the actions below need a trusted request.
+    const updater::Status u = updater::Current();
+    Dict d = CefDictionaryValue::Create();
+    d->SetString("state", updater::StateName(u.state));
+    d->SetString("current", ORBIT_VERSION);
+    d->SetString("latest", u.latest);
+    d->SetString("notes", u.notes_url);
+    d->SetInt("progress", u.progress);
+    d->SetString("error", u.error);
+    return Json(d);
+  }
+  if ((api == L"update-check" || api == L"update-download" || api == L"update-install") && !profile->is_private()) {
+    if (!req.trusted_action) return Error(403, "forbidden");
+    if (api == L"update-check") updater::Check(false);
+    if (api == L"update-download") updater::Download();
+    if (api == L"update-install") updater::InstallAndRestart();
+    return Ok();
   }
   if (api == L"default-browser" && req.trusted_action) {
     installer::MakeDefaultBrowser();
@@ -695,7 +716,8 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
                key == L"grey_out_inactive" || key == L"drag_window_from_content" || key == L"urlbar_wide" ||
                key == L"quick_actions" || key == L"tabs_right" || key == L"compact_flash" ||
                key == L"search_suggestions" || key == L"ctrl_tab_ignore_essentials" ||
-               key == L"continue_where_left_off" || key == L"autofill_passwords") {
+               key == L"continue_where_left_off" || key == L"autofill_passwords" ||
+               key == L"update_auto_check") {
       store.SetPref(Store::kGlobalScope, key, value == L"1" ? L"1" : L"0");
       app->ApplyThemeToAllWindows();  // windows re-read their settings
     } else if (key == L"glance_trigger" || key == L"urlbar_behavior") {
@@ -1286,6 +1308,7 @@ InternalResponse WelcomeApi(const InternalRequest& req, Profile* profile) {
     }
     d->SetList("colors", colors);
     d->SetBool("private", profile->is_private());
+    d->SetBool("defaultBrowser", installer::IsDefaultBrowser());
     return Json(d);
   }
   if (!req.trusted_action) return Error(403, "forbidden");

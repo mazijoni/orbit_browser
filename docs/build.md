@@ -60,6 +60,19 @@ H.264/AAC are covered by patent pools; the build comes with no patent licence. W
 
 ## Installer (Windows setup program)
 
-`pwsh ./scripts/package.ps1` builds Release, stages `dist/Orbit-<version>` and zips it; `pwsh ./scripts/make_installer.ps1` then compiles `installer/orbit.iss` (Inno Setup, installed with Chocolatey or winget if missing) into `dist/Orbit-<version>-setup.exe`. The setup is per user (no administrator rights): it unpacks to a temporary folder and runs Orbit's own `orbit.exe --install --quiet`, which copies Orbit to `%LOCALAPPDATA%\Programs\Orbit`, registers it as a browser, makes the Start menu shortcut and the Apps & features entry (uninstall there, or `orbit.exe --uninstall`). User data is never touched by install.
+`pwsh ./scripts/package.ps1` builds Release, stages `dist/Orbit-<version>` and zips it; `pwsh ./scripts/make_installer.ps1` then compiles `installer/orbit.iss` (Inno Setup, installed with Chocolatey or winget if missing) into `dist/Orbit Browser Setup.exe`. The setup is per user (no administrator rights): it unpacks to a temporary folder and runs Orbit's own `orbit.exe --install --quiet`, which copies Orbit to `%LOCALAPPDATA%\Programs\Orbit`, registers it as a browser, makes the Start menu shortcut and the Apps & features entry (uninstall there, or `orbit.exe --uninstall`). User data is never touched by install.
 
-GitHub Actions (`.github/workflows/installer.yml`) does this on every push and uploads the setup as the `Orbit-setup` artifact of the run; pushing a tag such as `v0.1.0` attaches it (and the zip) to a GitHub release. The binaries are unsigned, so SmartScreen warns until they are code-signed.
+GitHub Actions (`.github/workflows/installer.yml`) does this on every push and uploads the setup as the `Orbit Browser` artifact of the run (and `orbit.pdb` as `Orbit symbols`); pushing a tag such as `v0.1.0` attaches it (and the zip) to a GitHub release. The binaries are unsigned, so SmartScreen warns until they are code-signed.
+
+## Publishing an update
+
+Orbit's Settings → Updates, and a daily background check, read the newest GitHub release of `mazijoni/orbit_browser` (`app/updater.h`, `kRepository`). The repository must be public, or the call fails without a token.
+
+To ship a version:
+
+1. Raise `project(orbit VERSION x.y.z)` in `CMakeLists.txt` and commit.
+2. Run `git tag vx.y.z`, then `git push origin main --tags`.
+
+The workflow attaches `Orbit Browser Setup.exe` to the release. GitHub renames it `Orbit.Browser.Setup.exe`; the updater looks for an `.exe` asset with "Setup" in its name.
+
+Installed copies then offer "Download update" and "Restart to update". The setup runs with `/SILENT /relaunch=1` and opens Orbit again.

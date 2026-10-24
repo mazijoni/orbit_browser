@@ -551,11 +551,22 @@ class ContextReady : public CefRequestContextHandler {
     // Chrome's download bubble would pop up over Orbit when a download starts
     // (an extension install from the Web Store downloads a file); Orbit has
     // its own downloads UI.
+    // Chromium's own password manager, autofill and translate would show
+    // their bubbles (anchored to a Chrome toolbar Orbit does not have; the
+    // password one was behind a crash on sign-in). Orbit has its own
+    // password saving and autofill.
     CefRefPtr<CefValue> off = CefValue::Create();
     off->SetBool(false);
-    CefString error;
-    if (context->CanSetPreference("download_bubble.partial_view_enabled")) {
-      context->SetPreference("download_bubble.partial_view_enabled", off, error);
+    for (const char* name : {"download_bubble.partial_view_enabled", "credentials_enable_service",
+                             "credentials_enable_autosignin", "autofill.profile_enabled",
+                             "autofill.credit_card_enabled", "translate.enabled",
+                             // Chrome's own account sign-in: after a Google login on a web
+                             // page it would offer "Sign in to Chromium" / a new profile.
+                             "signin.allowed", "profile.password_manager_leak_detection"}) {
+      CefString error;
+      if (!context->CanSetPreference(name) || !context->SetPreference(name, off, error)) {
+        ORBIT_LOG_WARNING("could not turn off Chrome preference %s", name);
+      }
     }
   }
   IMPLEMENT_REFCOUNTING(ContextReady);

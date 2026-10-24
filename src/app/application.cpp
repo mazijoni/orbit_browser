@@ -258,7 +258,11 @@ void Application::Start(const std::vector<std::wstring>& urls) {
   // zen.workspaces.continue-where-left-off (default off): the session is
   // restored, but each window opens on an empty tab with the URL bar
   // (ZenSpaceManager selects its empty tab) rather than the last tab.
+  // After "Restart to update" the windows come back as they were, once.
+  const bool after_update = store_->GetPref(Store::kGlobalScope, L"restore_selected_once").value_or(L"0") == L"1";
+  if (after_update) store_->SetPref(Store::kGlobalScope, L"restore_selected_once", L"0");
   const bool start_empty =
+      !after_update &&
       store_->GetPref(Store::kGlobalScope, L"continue_where_left_off").value_or(L"0") != L"1";
   for (const WindowRecord& rec : store_->LoadWindows()) {
     // The window comes back on its space, whichever profile that space is in
@@ -743,6 +747,7 @@ BrowserWindow* Application::OpenPrivateWindow() {
 }
 
 void Application::OnWindowCloseRequested(BrowserWindow* window) {
+  ORBIT_LOG_INFO("window close requested (%zu window(s) open)", windows_.size());
   // Closing a linked window brings its tabs back to the parent space, in a
   // folder, unless it is the last window (the session keeps it then).
   Workspace* linked = window->closing() ? nullptr : window->linked_space();

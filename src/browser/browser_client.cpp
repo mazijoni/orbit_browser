@@ -268,6 +268,8 @@ bool BrowserClient::OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFr
   // opener (window.opener, postMessage and window.close() keep working), but
   // lives inside Orbit's window as a tab, never as a window of its own (a
   // native Alloy popup crashed in Chrome style).
+  ORBIT_LOG_INFO("popup %d from browser %d: disposition %d, %s frame", popup_id, browser->GetIdentifier(),
+                 static_cast<int>(target_disposition), frame && frame->IsMain() ? "main" : "sub");
   if (target_disposition == CEF_WOD_NEW_POPUP) {
     Tab* tab = window->CreatePopupTab(opener, target_url.ToWString(), true, windowInfo, /*as_glance=*/true);
     if (!tab) return true;

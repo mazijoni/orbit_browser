@@ -5125,7 +5125,10 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
       Application::Get()->SaveNow();
       return TRUE;
     case WM_ENDSESSION:
-      if (wp) Application::Get()->SaveNow();
+      if (wp) {
+        ORBIT_LOG_INFO("Windows is ending the session");
+        Application::Get()->SaveNow();
+      }
       return 0;
   }
   return ::DefWindowProcW(hwnd_, msg, wp, lp);
@@ -7801,6 +7804,8 @@ void BrowserWindow::OpenNormalWindow() {
   Profile* target = profile_->is_private() ? app->profiles().front().get() : profile_;
   app->OpenWindow(target, app->FreeWorkspaceFor(target), nullptr);
 }
+
+void BrowserWindow::OpenSettingsPage() { OpenInternalPage(kPageSettings); }
 
 void BrowserWindow::OpenInternalPage(int page) {
   static constexpr const wchar_t* kPages[] = {L"orbit://downloads/", L"orbit://bookmarks/",

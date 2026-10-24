@@ -499,6 +499,7 @@ void Tab::NoteClosedByPage() {
       load_state_ == LoadState::kClosing) {
     return;  // Orbit asked for this close itself
   }
+  ORBIT_LOG_INFO("tab %lld closed by its page (window.close)", static_cast<long long>(record_.id));
   close_requested_ = true;
 }
 

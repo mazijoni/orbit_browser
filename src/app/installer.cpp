@@ -7,6 +7,7 @@
 #include <propvarutil.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
 
@@ -283,17 +284,34 @@ bool HasToken(const std::wstring& command_line, const wchar_t* token) {
 
 }  // namespace
 
-bool IsDefaultBrowser() {
-  for (const wchar_t* scheme : {L"http", L"https"}) {
-    const std::wstring key = std::wstring(L"Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\") +
-                             scheme + L"\\UserChoice";
+namespace {
+// The ProgID Windows opens |scheme| links with. Windows 11 (2025+) keeps the
+// user's choice under UserChoiceLatest\ProgId and may leave UserChoice empty;
+// older builds use UserChoice. The shell's own answer is the fallback.
+std::wstring DefaultProgIdFor(const wchar_t* scheme) {
+  const std::wstring base =
+      std::wstring(L"Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\") + scheme;
+  for (const wchar_t* sub : {L"\\UserChoiceLatest\\ProgId", L"\\UserChoice"}) {
     wchar_t progid[128] = {};
     DWORD size = sizeof(progid);
-    if (::RegGetValueW(HKEY_CURRENT_USER, key.c_str(), L"ProgId", RRF_RT_REG_SZ, nullptr, progid, &size) !=
-            ERROR_SUCCESS ||
-        std::wstring(progid) != kProgId) {
-      return false;
+    if (::RegGetValueW(HKEY_CURRENT_USER, (base + sub).c_str(), L"ProgId", RRF_RT_REG_SZ, nullptr, progid,
+                       &size) == ERROR_SUCCESS &&
+        progid[0]) {
+      return progid;
     }
+  }
+  wchar_t progid[128] = {};
+  DWORD length = 128;
+  if (SUCCEEDED(::AssocQueryStringW(ASSOCF_IS_PROTOCOL, ASSOCSTR_PROGID, scheme, nullptr, progid, &length))) {
+    return progid;
+  }
+  return {};
+}
+}  // namespace
+
+bool IsDefaultBrowser() {
+  for (const wchar_t* scheme : {L"http", L"https"}) {
+    if (DefaultProgIdFor(scheme) != kProgId) return false;
   }
   return true;
 }

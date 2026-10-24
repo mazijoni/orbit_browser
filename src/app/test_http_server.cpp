@@ -140,9 +140,38 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
   } else if (path == "/popupbtn") {
     // A big link at the top-left that opens a sign-in style popup window.
     body = "<!doctype html><title>popupbtn</title><style>body{margin:0}a{display:block;width:400px;height:200px;"
-           "background:#ddd}</style><a href=\"#\" onclick=\"window.open('/page?t=PopupGlance','login',"
-           + std::string(target.find("plain") != std::string::npos ? "''" : "'width=420,height=320'") +
-           ");return false\">sign in</a>";
+           "background:#ddd}</style><a href=\"#\" onclick=\"window.open(" +
+           std::string(target.find("signinnav") != std::string::npos ? "'/signin-nav'"
+                       : target.find("signin") != std::string::npos ? "'/signin'"
+                                                                     : "'/page?t=PopupGlance'") +
+           ",'login'," + std::string(target.find("plain") != std::string::npos ? "''" : "'width=420,height=320'") +
+           ");return false\">sign in</a><script>addEventListener('message', (e) => {"
+           " if (e.data === 'signed-in') location = '/page?t=Welcome'; });</script>";
+  } else if (path == "/signin") {
+    // Like a provider's sign-in popup: submitting reports to the opener and
+    // closes the window at once (Google's sign-in does this).
+    body = "<!doctype html><title>signin</title><body><form id=f>"
+           "<input id=u type=email value=someone@example.com><input id=p type=password>"
+           "<button type=submit>Next</button></form><script>"
+           "f.addEventListener('submit', (e) => { e.preventDefault();"
+           " if (window.opener) window.opener.postMessage('signed-in', '*'); window.close(); });"
+           "</script></body>";
+  } else if (path == "/signin-nav") {
+    // A provider's sign-in popup that really submits: the password page posts,
+    // the next page tells the opener and closes the popup.
+    body = "<!doctype html><title>signin-nav</title><body><form id=f method=post action=\"/signin-done\">"
+           "<input id=u type=email name=user autocomplete=username><input id=p type=password name=pass "
+           "autocomplete=current-password><button type=submit>Next</button></form></body>";
+  } else if (path == "/signin-done") {
+    body = "<!doctype html><title>signin-done</title><body>signed in<script>"
+           "if (window.opener) window.opener.postMessage('signed-in', '*'); setTimeout(() => window.close(), 200);"
+           "</script></body>";
+  } else if (path == "/login-nav") {
+    // A sign-in form that really submits (the page navigates), which is what
+    // makes Chromium's own password manager offer to save the login.
+    body = "<!doctype html><title>login-nav</title><body><form id=f method=post action=\"/page?t=SignedIn\">"
+           "<input id=u type=text name=user autocomplete=username><input id=p type=password name=pass autocomplete=current-password>"
+           "<button type=submit>Sign in</button></form></body>";
   } else if (path == "/text") {
     // /text?t=<title>&body=<text>: a page of plain text (find in page).
     body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) + "</title><body><p>" +

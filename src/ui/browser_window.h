@@ -402,6 +402,8 @@ class BrowserWindow {
   void OnExtensionsChanged();
   // Zen's toast in the window's top-right corner.
   void ShowToast(ui::Toast::Content content);
+  // Opens (or switches to) orbit://settings/.
+  void OpenSettingsPage();
 
  private:
   enum class HitKind {

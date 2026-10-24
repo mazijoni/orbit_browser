@@ -3,6 +3,7 @@
 #include "app/application.h"
 #include "browser/default_client.h"
 #include "app/self_test.h"
+#include "app/updater.h"
 #include "browser/internal_pages.h"
 #include "core/strings.h"
 #include "core/url_fixup.h"
@@ -564,6 +565,8 @@ void OrbitApp::OnContextInitialized() {
   // Self-tests only run against an explicitly chosen data directory.
   if (command_line->HasSwitch("orbit-self-test") && command_line->HasSwitch("user-data-dir")) {
     self_test::Start(command_line->GetSwitchValue("orbit-self-test").ToWString());
+  } else {
+    updater::MaybeCheckInBackground();
   }
   // Benchmark hook (scripts/benchmark.ps1): after N seconds, run the sleep
   // policy on every background tab regardless of idle time.

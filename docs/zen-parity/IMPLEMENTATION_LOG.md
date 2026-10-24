@@ -352,7 +352,7 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
   | WebAuthn / passkeys | Present: `PublicKeyCredential` and a user-verifying platform authenticator (Windows Hello) are available |
   | WebGPU, USB, HID, Serial, Bluetooth, clipboard, fullscreen, picture-in-picture, share, payments, speech, file system picker | All present in the probe |
   | Drag and drop of links / files into the window | Not checked |
-  | Default browser setting | Welcome page links to Windows Default apps; no in-app check |
+  | Default browser setting | **Added**: Settings card, menu item, hidden when Orbit is the default (0.1.3 / 0.1.4) |
   | Sync | Out of scope |
   | Reader mode, page screenshot | Not present |
 
@@ -363,6 +363,26 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
 - Popups and extension windows (2026-10-23): every popup crashed in Chrome style (`Tab::PrepareForPopup` still asked for Alloy style under a Chrome-style opener). Now Chrome style; `window.open` with popup features (sign-in windows) opens as a glance over the opener (`CreatePopupTab(..., as_glance)`) with `window.opener` intact, and `window.close()` closes it (`Tab::NoteClosedByPage`: a close the page started now removes the tab). Windows Chromium opens on its own (extension `chrome.tabs.create` / `chrome.windows.create`) go to `DefaultClient`, which adopts any such page as a tab (profile's window, else any window). The store rewrite no longer hides page parts: it rewords the banner, hides only the "Install Chrome" button and clicks the nag's own "No thanks". Self-tests: popup glance + close (`zen`), extension tab + window (`extensions`). Chrome's install / remove confirmations remain Chrome-drawn dialogs.
 
 - 0.1.3 (2026-10-24): the "extra Chromium" after a Web Store install was traced with a live install (manual suite `store-install`, needs the internet; Chrome's dialog accepted through UI Automation): Chrome opens a New Tab window to show its "added to Chromium" bubble, plus its download bubble. `DefaultClient` now moves such windows off screen at once and closes them when they hold no web / extension page; the download bubble is off per profile (`download_bubble.partial_view_enabled`, set in `OnRequestContextInitialized`); Orbit shows its own "<name> was added to Orbit" toast (the bridge starts on Web Store pages). Extensions button + pinned extensions on the left of the top bar (multiple toolbars: beside it; single toolbar: the button after the compact toggle, pins on a row under the address bar); pin / unpin from the button's menu, stored per profile (`extensions_pinned`). Default browser: Settings card and main-menu item (`installer::IsDefaultBrowser`, `MakeDefaultBrowser` registers and opens Default apps). Version 0.1.3; the setup is `Orbit Browser Setup.exe`.
+
+- 0.1.4 (2026-10-24):
+  1. **Sign-in crash.** On the user's machine the process ended with no Windows error report and no "clean shutdown" line. Chromium's Local State says it exited cleanly, so the exact cause is not proven.
+     - Chrome's own browser sign-in and password leak check are now off per profile (`signin.allowed`, `profile.password_manager_leak_detection`), next to the password manager prefs.
+     - A new `zen` test signs in through a popup glance: real typing and Enter, a POST, a message to the opener, then `window.close()`.
+     - Diagnostics now run in every session (`app/crash_log.*`):
+       - Fatal exceptions go to orbit.log with the module + offset and the stack.
+       - An unhandled exception also writes a minidump to `<User Data>\Crashes` (5 kept).
+       - An `ExitProcess` from anywhere logs its caller.
+     - Release links with `/DEBUG`, and CI uploads `orbit.pdb` as the "Orbit symbols" artifact so offsets can be read.
+     - Popups, page-initiated closes and window close requests are logged (no URLs).
+  2. **Default browser.** Windows 11 keeps the choice under `UrlAssociations\<scheme>\UserChoiceLatest\ProgId` and leaves `UserChoice` empty, so Orbit never saw itself as the default.
+     - `IsDefaultBrowser` now reads that key, then `UserChoice`, then `AssocQueryString`.
+     - The Settings button, the menu item and the welcome step disappear when Orbit is the default (`zen` test).
+  3. **Updates** (`app/updater.*`). The latest GitHub release of `mazijoni/orbit_browser` (from the GitHub API) is compared with the running version.
+     - Settings → Updates checks, then downloads the release's setup over HTTPS. The SHA-256 is checked against the `digest` GitHub lists for the asset.
+     - "Restart to update" closes Orbit cleanly. After `CefShutdown` it starts the setup silently with `/relaunch=1`; orbit.iss then starts Orbit again, and the open tabs are restored once.
+     - A daily background check shows a toast (Settings toggle, on by default).
+     - Needs a public repository and a published `v*` release.
+     - `zen` test: version comparison. The live check is informational.
 
 ## Next actions
 
