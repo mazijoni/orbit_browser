@@ -239,10 +239,24 @@ CREATE TABLE passwords (
 CREATE INDEX passwords_profile ON passwords(profile_id, origin);
 )sql";
 
+// v14: favicons, so a sleeping or restored tab (no page loaded) shows its
+// site's icon instead of the blank one. Keyed by the icon's URL (shared by
+// every tab of a site); premultiplied BGRA, at most 32x32. Never written for
+// private windows.
+constexpr const char* kMigrationV14 = R"sql(
+CREATE TABLE favicons (
+  url TEXT PRIMARY KEY,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  pixels BLOB NOT NULL,
+  used_at INTEGER NOT NULL DEFAULT 0
+);
+)sql";
+
 constexpr const char* kMigrations[] = {kMigrationV1,  kMigrationV2,  kMigrationV3,  kMigrationV4,
                                        kMigrationV5,  kMigrationV6,  kMigrationV7,  kMigrationV8,
                                        kMigrationV9,  kMigrationV10, kMigrationV11, kMigrationV12,
-                                       kMigrationV13};
+                                       kMigrationV13, kMigrationV14};
 static_assert(sizeof(kMigrations) / sizeof(kMigrations[0]) == kSchemaVersion);
 
 }  // namespace

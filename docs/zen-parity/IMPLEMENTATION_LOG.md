@@ -384,6 +384,12 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
      - Needs a public repository and a published `v*` release.
      - `zen` test: version comparison. The live check is informational.
 
+- 0.1.5 (2026-10-24): sleeping tabs show their site's icon in black and white instead of the blank globe.
+  - Favicons are now saved: schema v14 table `favicons` (icon URL → premultiplied BGRA, at most 32x32), never written for private windows. Icons no tab uses and unused for 90 days are pruned at startup.
+  - A tab created from its saved record (a restored session, tabs not loaded yet) reads its icon from that table.
+  - A sleeping or unloaded tab's icon is drawn in grayscale (Rec. 601 luminance) at 60% opacity, in the sidebar and the Essentials grid (`BitmapFor(..., gray)`).
+  - `zen` test: the icon is stored, a tab built from the record has the right pixels before loading, and a discarded tab keeps its icon.
+
 ## Next actions
 
 1. Check by hand, with a real mouse: drag a tab out of the window onto the desktop (a linked window opens at the cursor), and onto another Orbit window (the tab moves there).

@@ -220,6 +220,37 @@ std::vector<PasswordRecord> Store::LoadPasswords(int64_t profile_id) {
   return out;
 }
 
+std::optional<Store::FaviconRow> Store::LoadFavicon(const std::wstring& url) {
+  auto s = db_.Prepare("SELECT width, height, pixels FROM favicons WHERE url = ?");
+  s.Bind(1, url);
+  if (!s.Step()) return std::nullopt;
+  FaviconRow row{s.ColumnInt(0), s.ColumnInt(1), s.ColumnBlob(2)};
+  if (row.width <= 0 || row.height <= 0 || row.width > 256 || row.height > 256 ||
+      row.bgra.size() != static_cast<size_t>(row.width) * row.height * 4) {
+    return std::nullopt;
+  }
+  return row;
+}
+
+bool Store::SaveFavicon(const std::wstring& url, int width, int height, const std::vector<uint8_t>& bgra) {
+  if (url.empty() || width <= 0 || height <= 0 || width > 256 || height > 256 ||
+      bgra.size() != static_cast<size_t>(width) * height * 4) {
+    return false;
+  }
+  auto s = db_.Prepare(
+      "INSERT INTO favicons (url, width, height, pixels, used_at) VALUES (?1, ?2, ?3, ?4, ?5) "
+      "ON CONFLICT(url) DO UPDATE SET width = ?2, height = ?3, pixels = ?4, used_at = ?5");
+  s.Bind(1, url).Bind(2, width).Bind(3, height).BindBlob(4, bgra.data(), bgra.size()).Bind(5, NowUnixMillis());
+  return s.Run();
+}
+
+void Store::PruneFavicons(int64_t max_age_ms) {
+  auto s = db_.Prepare(
+      "DELETE FROM favicons WHERE used_at < ? AND url NOT IN (SELECT favicon_url FROM tabs)");
+  s.Bind(1, NowUnixMillis() - max_age_ms);
+  s.Run();
+}
+
 std::vector<PasswordRecord> Store::FindPasswords(int64_t profile_id, const std::wstring& origin) {
   std::vector<PasswordRecord> out;
   auto s = db_.Prepare(

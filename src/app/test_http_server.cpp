@@ -172,6 +172,10 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
     body = "<!doctype html><title>login-nav</title><body><form id=f method=post action=\"/page?t=SignedIn\">"
            "<input id=u type=text name=user autocomplete=username><input id=p type=password name=pass autocomplete=current-password>"
            "<button type=submit>Sign in</button></form></body>";
+  } else if (path == "/iconpage") {
+    // A page with a red 16x16 favicon (a data: PNG).
+    body = "<!doctype html><title>iconpage</title><link rel=icon href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGO4Iyf3nxLMMGrAqAGjBgwXAwDHMhcf6ozWIQAAAABJRU5ErkJggg==\">"
+           "<body>icon</body>";
   } else if (path == "/text") {
     // /text?t=<title>&body=<text>: a page of plain text (find in page).
     body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) + "</title><body><p>" +

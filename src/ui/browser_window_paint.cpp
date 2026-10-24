@@ -25,6 +25,9 @@ using ui::metrics::kRowRadius;
 
 namespace {
 
+// A sleeping (unloaded) tab shows its icon in black and white at this opacity.
+constexpr float kSleepingIconOpacity = 0.6f;
+
 D2D1_COLOR_F Alpha(D2D1_COLOR_F c, float factor) {
   c.a *= factor;
   return c;
@@ -872,8 +875,8 @@ void BrowserWindow::PaintEssentials(ID2D1RenderTarget* rt) {
       const float start = spinner_phase_ * 2.f * std::numbers::pi_v<float>;
       brush_->SetColor(Alpha(palette_.text, 0.75f));
       DrawArc(rt, brush_.Get(), {cx, cy}, 6.5f, start, 4.2f, 1.6f);
-    } else if (icon_bitmap) {
-      rt->DrawBitmap(icon_bitmap, icon, sleeping ? 0.5f : 1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    } else if (ID2D1Bitmap* shown = sleeping ? FaviconBitmap(tab, true) : icon_bitmap) {
+      rt->DrawBitmap(shown, icon, sleeping ? kSleepingIconOpacity : 1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     } else {
       brush_->SetColor(Alpha(palette_.text_secondary, sleeping ? 0.5f : 1.f));
       DrawGlyph(rt, Graphics::Get().icons_small(), glyph::kGlobe, icon, brush_.Get());
@@ -1228,8 +1231,9 @@ void BrowserWindow::PaintTabRow(ID2D1RenderTarget* rt, int index, const D2D1_REC
     const float start = spinner_phase_ * 2.f * std::numbers::pi_v<float>;
     brush_->SetColor(Alpha(palette_.text, 0.75f));
     DrawArc(rt, brush_.Get(), {icon_x + 8.f, cy}, 6.5f, start, 4.2f, 1.6f);
-  } else if (ID2D1Bitmap* bitmap = FaviconBitmap(tab)) {
-    rt->DrawBitmap(bitmap, icon, dim, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+  } else if (ID2D1Bitmap* bitmap = FaviconBitmap(tab, sleeping)) {
+    // Sleeping tabs: the site's icon in black and white, faded.
+    rt->DrawBitmap(bitmap, icon, sleeping ? kSleepingIconOpacity : 1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
   } else {
     // Zen's blank favicon: a soft rounded square.
     brush_->SetColor(Alpha(palette_.element_bg, 1.4f * dim));
@@ -1467,9 +1471,9 @@ void BrowserWindow::PaintPopup() {
   }
 }
 
-ID2D1Bitmap* BrowserWindow::FaviconBitmap(Tab* tab) {
+ID2D1Bitmap* BrowserWindow::FaviconBitmap(Tab* tab, bool gray) {
   if (tab->favicon().bgra.empty()) return nullptr;
-  return BitmapFor(tab->favicon(), favicons_[tab]);
+  return BitmapFor(tab->favicon(), favicons_[tab], gray);
 }
 
 ID2D1Bitmap* BrowserWindow::PinnedFaviconBitmap(Tab* tab) {
@@ -1477,19 +1481,32 @@ ID2D1Bitmap* BrowserWindow::PinnedFaviconBitmap(Tab* tab) {
   return BitmapFor(tab->pinned_favicon(), pinned_favicons_[tab]);
 }
 
-ID2D1Bitmap* BrowserWindow::BitmapFor(const FaviconPixels& px, CachedFavicon& cached) {
-  if (cached.bitmap && cached.generation == px.generation) return cached.bitmap.Get();
-  cached.bitmap.Reset();
+ID2D1Bitmap* BrowserWindow::BitmapFor(const FaviconPixels& px, CachedFavicon& cached, bool gray) {
+  Microsoft::WRL::ComPtr<ID2D1Bitmap>& bitmap = gray ? cached.gray : cached.bitmap;
+  uint32_t& generation = gray ? cached.gray_generation : cached.generation;
+  if (bitmap && generation == px.generation) return bitmap.Get();
+  bitmap.Reset();
   const auto props = D2D1::BitmapProperties(
       D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+  std::vector<uint8_t> mono;
+  const uint8_t* pixels = px.bgra.data();
+  if (gray) {
+    // Luminance (Rec. 601) of the premultiplied colour; it never exceeds the
+    // alpha, so the result stays valid premultiplied BGRA.
+    mono = px.bgra;
+    for (size_t i = 0; i + 3 < mono.size(); i += 4) {
+      const auto y = static_cast<uint8_t>((mono[i] * 29 + mono[i + 1] * 150 + mono[i + 2] * 77) >> 8);
+      mono[i] = mono[i + 1] = mono[i + 2] = y;
+    }
+    pixels = mono.data();
+  }
   if (FAILED(rt_->CreateBitmap(D2D1::SizeU(static_cast<UINT32>(px.width),
                                            static_cast<UINT32>(px.height)),
-                               px.bgra.data(), static_cast<UINT32>(px.width) * 4, props,
-                               &cached.bitmap))) {
+                               pixels, static_cast<UINT32>(px.width) * 4, props, &bitmap))) {
     return nullptr;
   }
-  cached.generation = px.generation;
-  return cached.bitmap.Get();
+  generation = px.generation;
+  return bitmap.Get();
 }
 
 }  // namespace orbit

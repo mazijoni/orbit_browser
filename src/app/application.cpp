@@ -254,6 +254,8 @@ bool Application::ShortcutRecording() const {
 void Application::Start(const std::vector<std::wstring>& urls) {
   started_ = true;
   LoadShortcuts();
+  // Icons of sites no tab shows and not seen for 90 days.
+  store_->PruneFavicons(90ll * 24 * 60 * 60 * 1000);
   UpdateSleepPolicy();
   // zen.workspaces.continue-where-left-off (default off): the session is
   // restored, but each window opens on an empty tab with the URL bar

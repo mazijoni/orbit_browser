@@ -583,13 +583,16 @@ class BrowserWindow {
   void PaintSoftShadow(ID2D1RenderTarget* rt, const D2D1_RECT_F& r, float radius,
                        float spread, float offset_y, float alpha);
   void PaintPopup();
-  ID2D1Bitmap* FaviconBitmap(Tab* tab);
+  // |gray|: the black-and-white icon a sleeping tab shows.
+  ID2D1Bitmap* FaviconBitmap(Tab* tab, bool gray = false);
   ID2D1Bitmap* PinnedFaviconBitmap(Tab* tab);
   struct CachedFavicon {
     uint32_t generation = 0;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
+    uint32_t gray_generation = 0;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> gray;  // sleeping tabs: black and white
   };
-  ID2D1Bitmap* BitmapFor(const FaviconPixels& px, CachedFavicon& cached);
+  ID2D1Bitmap* BitmapFor(const FaviconPixels& px, CachedFavicon& cached, bool gray = false);
   void RefreshBackdrop();  // workspace color or theme strength changed
   D2D1_COLOR_F BackdropAt(float x, float y) const;
   D2D1_COLOR_F UrlFieldColor() const;  // opaque, so the EDIT can match it

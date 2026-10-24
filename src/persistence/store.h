@@ -237,6 +237,17 @@ class Store {
   // never sees cleartext. Upsert replaces the secret for an existing
   // (origin, username). Never written for private profiles.
   std::vector<PasswordRecord> LoadPasswords(int64_t profile_id);
+  // Favicon cache (by icon URL): premultiplied BGRA pixels.
+  struct FaviconRow {
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> bgra;
+  };
+  std::optional<FaviconRow> LoadFavicon(const std::wstring& url);
+  bool SaveFavicon(const std::wstring& url, int width, int height, const std::vector<uint8_t>& bgra);
+  // Drops icons no tab uses that were not used for |max_age_ms|.
+  void PruneFavicons(int64_t max_age_ms);
+
   std::vector<PasswordRecord> FindPasswords(int64_t profile_id, const std::wstring& origin);
   int64_t UpsertPassword(const PasswordRecord& password);
   bool TouchPassword(int64_t profile_id, int64_t id, int64_t used_at);

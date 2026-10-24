@@ -48,6 +48,13 @@ Database::Statement& Database::Statement::Bind(int index, std::wstring_view valu
   return *this;
 }
 
+Database::Statement& Database::Statement::BindBlob(int index, const void* data, size_t size) {
+  if (stmt_ && sqlite3_bind_blob(stmt_, index, data, static_cast<int>(size), SQLITE_TRANSIENT) != SQLITE_OK) {
+    failed_ = true;
+  }
+  return *this;
+}
+
 Database::Statement& Database::Statement::BindNull(int index) {
   if (stmt_ && sqlite3_bind_null(stmt_, index) != SQLITE_OK) failed_ = true;
   return *this;
@@ -99,6 +106,14 @@ std::wstring Database::Statement::ColumnText(int col) const {
   const int len = sqlite3_column_bytes(stmt_, col);
   if (!text || len <= 0) return {};
   return FromUtf8(std::string_view(text, static_cast<size_t>(len)));
+}
+
+std::vector<uint8_t> Database::Statement::ColumnBlob(int col) const {
+  if (!stmt_) return {};
+  const auto* data = static_cast<const uint8_t*>(sqlite3_column_blob(stmt_, col));
+  const int len = sqlite3_column_bytes(stmt_, col);
+  if (!data || len <= 0) return {};
+  return std::vector<uint8_t>(data, data + len);
 }
 
 bool Database::Statement::ColumnIsNull(int col) const {

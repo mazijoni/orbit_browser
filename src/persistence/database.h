@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 struct sqlite3;
 struct sqlite3_stmt;
@@ -34,6 +35,7 @@ class Database {
     Statement& Bind(int index, double value);
     Statement& Bind(int index, std::wstring_view value);
     Statement& BindNull(int index);
+    Statement& BindBlob(int index, const void* data, size_t size);
 
     // Advances to the next row. Returns false when done or on error.
     bool Step();
@@ -47,6 +49,7 @@ class Database {
     double ColumnDouble(int col) const;
     std::wstring ColumnText(int col) const;
     bool ColumnIsNull(int col) const;
+    std::vector<uint8_t> ColumnBlob(int col) const;
 
    private:
     friend class Database;

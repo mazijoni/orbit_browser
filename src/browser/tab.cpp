@@ -96,7 +96,17 @@ class FaviconCallback : public CefDownloadImageCallback {
 }  // namespace
 
 Tab::Tab(Workspace* workspace, TabRecord record)
-    : workspace_(workspace), record_(std::move(record)) {}
+    : workspace_(workspace), record_(std::move(record)) {
+  // A restored tab has no page yet: its icon comes from the favicon cache.
+  if (!record_.favicon_url.empty() && profile() && !profile()->is_private()) {
+    if (auto cached = Application::Get()->store().LoadFavicon(record_.favicon_url)) {
+      favicon_.width = cached->width;
+      favicon_.height = cached->height;
+      favicon_.bgra = std::move(cached->bgra);
+      ++favicon_.generation;
+    }
+  }
+}
 
 // The DevTools browser of one tab. It is not a tab: BrowserClient would close
 // it, so it has a client of its own that reports to the tab.
@@ -704,6 +714,9 @@ void Tab::OnFaviconImage(int width, int height, std::vector<uint8_t> bgra) {
   favicon_.height = height;
   favicon_.bgra = std::move(bgra);
   ++favicon_.generation;
+  if (profile() && !profile()->is_private()) {
+    Application::Get()->store().SaveFavicon(record_.favicon_url, width, height, favicon_.bgra);
+  }
   if (record_.pinned && !pin_changed()) pinned_favicon_ = favicon_;
   NotifyChanged();
 }

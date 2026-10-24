@@ -1142,6 +1142,49 @@ void AddZenSuite(Runner& r) {
     s->window->CloseTabShortcut(s->tab);
     return true;
   }, 15000);
+  // Sleeping and restored tabs keep their site's icon (the favicon cache).
+  struct Icon {
+    Tab* tab = nullptr;
+    Tab* other = nullptr;
+    TestHttpServer server;
+  };
+  auto ic = std::make_shared<Icon>();
+  r.Add("favicon: a page's icon is stored in the favicon cache", [s, ic, &r] {
+    r.Check(ic->server.Start(), "test HTTP server listening");
+    ic->tab = s->window->OpenTab(ic->server.Url(L"/iconpage"), true);
+  }, [ic, app, &r] {
+    if (ic->tab->loading() || ic->tab->favicon().bgra.empty()) return false;
+    auto cached = app->store().LoadFavicon(ic->tab->record().favicon_url);
+    r.Check(cached && cached->width > 0 && cached->bgra.size() == ic->tab->favicon().bgra.size(),
+            "the icon's pixels are in the database");
+    return true;
+  }, 15000);
+  r.Add("... a tab restored from its record has the icon before loading", [s, ic, &r] {
+    Tab restored(s->window->workspace(), ic->tab->record());
+    r.Check(!restored.has_browser() && !restored.favicon().bgra.empty(),
+            "an unloaded tab shows the site's icon, not the blank one");
+    const auto& px = restored.favicon().bgra;
+    // The test icon is red: B, G, R, A of a middle pixel.
+    const size_t mid = (static_cast<size_t>(restored.favicon().height / 2) * restored.favicon().width +
+                        restored.favicon().width / 2) * 4;
+    r.Check(mid + 3 < px.size() && px[mid + 2] > 150 && px[mid + 1] < 80, "with the right pixels (red)");
+  });
+  r.Add("... and a sleeping tab keeps it", [s, ic] {
+    ic->other = s->window->OpenTab(L"orbit://selftest/?t=Other", true);
+    ic->tab->Unload(/*mark_discarded=*/true);
+  }, [s, ic, &r] {
+    if (ic->tab->has_browser()) return false;
+    r.Check(!ic->tab->favicon().bgra.empty(), "the discarded tab still has its icon");
+    s->window->CloseTabShortcut(ic->other);
+    s->window->CloseTabShortcut(ic->tab);
+    return true;
+  }, 10000);
+  r.Add("... (its tabs closed)", nullptr, [s, ic] {
+    for (const auto& t : s->window->workspace()->tabs()) {
+      if (t.get() == ic->tab || t.get() == ic->other) return false;
+    }
+    return true;
+  }, 10000);
   r.Add("update check answers (GitHub, informational)", [] { updater::Check(false); }, [&r] {
     const updater::Status u = updater::Current();
     if (u.state == updater::State::kChecking) return false;
