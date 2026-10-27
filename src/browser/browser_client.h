@@ -1,7 +1,9 @@
 #pragma once
 
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "include/cef_client.h"
 #include "include/cef_context_menu_handler.h"
@@ -139,6 +141,8 @@ class BrowserClient : public CefClient,
                            CefRefPtr<CefContextMenuParams> params,
                            CefRefPtr<CefMenuModel> model) override;
   // Orbit draws the page menu itself (ui::TrackMenu), in the chrome's style.
+  // Self-tests: sees the page menu instead of the user (the menu is not shown).
+  static inline std::function<void(CefRefPtr<CefMenuModel>, CefRefPtr<CefContextMenuParams>)> test_menu_observer;
   bool RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                       CefRefPtr<CefContextMenuParams> params, CefRefPtr<CefMenuModel> model,
                       CefRefPtr<CefRunContextMenuCallback> callback) override;
@@ -152,6 +156,8 @@ class BrowserClient : public CefClient,
 
  private:
   std::unordered_map<int, Tab*> tabs_;           // browser id -> tab
+  // The spelling suggestions of the page menu being shown (kMenuSpellFirst + i).
+  std::vector<std::wstring> spell_suggestions_;
   std::unordered_map<int, Tab*> pending_popups_;  // popup id -> tab
   // Native popup windows (window.open with sizes: OAuth / sign-in). These are
   // real OS windows owned by their opener, not sidebar tabs, so window.close()

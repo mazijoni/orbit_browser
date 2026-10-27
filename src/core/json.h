@@ -31,4 +31,10 @@ struct JsonValue {
 
 std::optional<JsonValue> ParseJson(std::string_view text, int max_depth = 96);
 
+// |text| as a JSON string literal, quotes included (control characters and
+// quotes escaped; UTF-8 passes through).
+std::string JsonQuote(std::string_view text);
+// |value| written back as JSON (numbers in their shortest round-trip form).
+std::string ToJson(const JsonValue& value);
+
 }  // namespace orbit

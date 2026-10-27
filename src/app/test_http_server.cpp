@@ -183,6 +183,11 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
            "<button onclick=\"document.documentElement.requestFullscreen()\">full</button><script>"
            "document.onfullscreenchange = () => document.title = document.fullscreenElement ? 'fs-on' : 'fs-off';"
            "</script>";
+  } else if (path == "/spell") {
+    // Misspelled words in a focused text box (spelling suggestions).
+    body = "<!doctype html><title>spell</title><style>body{margin:0}textarea{width:600px;height:200px;"
+           "font:32px sans-serif;border:0;padding:0}</style><textarea id=t spellcheck=true autofocus>"
+           "helo wrold teh</textarea><script>t.focus();t.setSelectionRange(14,14);</script>";
   } else if (path == "/text") {
     // /text?t=<title>&body=<text>: a page of plain text (find in page).
     body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) + "</title><body><p>" +

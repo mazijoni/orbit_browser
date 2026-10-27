@@ -1,5 +1,6 @@
 #include "browser/extension_popup.h"
 
+
 #include <dwmapi.h>
 
 #include <algorithm>
@@ -7,6 +8,8 @@
 #include <cstdio>
 
 #include "app/application.h"
+#include "browser/browser_client.h"
+#include "browser/extension_actions.h"
 #include "browser/extension_bridge.h"
 #include "browser/profile.h"
 #include "browser/tab.h"
@@ -164,9 +167,12 @@ void ExtensionPopup::Open(BrowserWindow* window, const ExtensionInfo& extension,
   CefBrowserSettings settings;
   std::string path = extension.popup;
   if (path[0] == '/') path.erase(0, 1);
-  const std::string url = "chrome-extension://" + extension.id + "/" + path;
+  popup->url_ = "chrome-extension://" + extension.id + "/" + path;
+  if (Tab* tab = window->active_tab(); tab && tab->browser()) popup->tab_browser_id_ = tab->browser()->GetIdentifier();
   Current() = popup;
-  if (!CefBrowserHost::CreateBrowser(info, popup, url, settings, nullptr, window->profile()->request_context())) {
+  // Blank first: the page gets its tab context (extension_actions) before it runs.
+  if (!CefBrowserHost::CreateBrowser(info, popup, "about:blank", settings, nullptr,
+                                     window->profile()->request_context())) {
     ORBIT_LOG_ERROR("extension popup: CreateBrowser failed");
     ::DestroyWindow(popup->popup_);
     popup->popup_ = nullptr;
@@ -196,7 +202,15 @@ bool ExtensionPopup::OnOpenURLFromTab(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>
 
 void ExtensionPopup::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   browser_ = browser;
-  if (closing_) browser->GetHost()->CloseBrowser(true);
+  if (closing_) {
+    browser->GetHost()->CloseBrowser(true);
+    return;
+  }
+  Application* app = Application::Get();
+  Tab* tab = app ? app->client()->FindTab(tab_browser_id_) : nullptr;
+  extension_actions::PreparePopup(browser, tab, extension_id_, [self = CefRefPtr<ExtensionPopup>(this)] {
+    if (self->browser_ && !self->closing_) self->browser_->GetMainFrame()->LoadURL(self->url_);
+  });
 }
 
 void ExtensionPopup::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
@@ -229,7 +243,7 @@ void ExtensionPopup::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
 }
 
 void ExtensionPopup::OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int) {
-  if (!frame->IsMain() || closing_) return;
+  if (!frame->IsMain() || closing_ || frame->GetURL().ToString().rfind("chrome-extension://", 0) != 0) return;
   frame->ExecuteJavaScript(kMeasureScript, "", 0);
 }
 

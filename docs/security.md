@@ -24,6 +24,12 @@
 | Local data | Orbit stores no credentials. The SQLite metadata DB holds history, bookmarks, tab URLs and preferences, unencrypted, in the user's profile directory (same trust level as Chromium's own history DB) | — |
 | Extensions | Chrome's own extension system (MV3, permissions shown by Chrome before install, per-profile storage). Orbit adds: extension pages (`chrome-extension://`) cannot reach `orbit://` APIs (no gate header possible cross-origin, frame check kept); the bridge page is locked to `chrome://extensions` and its console channel is read only from that browser; action popups load only `chrome-extension://<id>/<manifest popup path>` after a path check (no scheme, `..`, backslash); private windows run no extensions; the Web Store brand override applies only to the store's own pages | `extensions` self-test: an extension page and a web page both fail to call `orbit://history/api/list`; a private window's page gets no content script; ids and popup paths are validated |
 | Logging | Orbit's log never contains URLs, titles or form data above verbose level | Code review (`core/log.h` rule) |
+| Private DevTools pipe | Orbit's browser process holds a Chrome DevTools Protocol connection to itself over an anonymous pipe pair (`--remote-debugging-pipe`; the handles are not inheritable, there is no port, no other program can connect). `--enable-unsafe-extension-debugging` applies only to pipe clients. It is used to deliver extension toolbar clicks only (`extension_actions`) | `extensions` self-test |
+| Extension toolbar clicks | What a real toolbar click grants (activeTab) is emulated narrowly.
+<br>• Only after the user clicked that extension, or opened its popup.
+<br>• Only for the tab it was clicked on, while that tab keeps its origin (and 5 minutes at most for a click).
+<br>• Only on http(s) pages, and only the main frame.
+<br>• Scripts run in an isolated world. The extension's own `chrome.scripting` call is tried first, and Orbit steps in only where Chrome refused it for lack of that grant | `extensions` self-test |
 | Updates | Orbit asks only `https://api.github.com/repos/mazijoni/orbit_browser/releases/latest` (WinHTTP, TLS 1.2+, no cookies, never redirected to HTTP).
 <br>• The setup is downloaded only after a click, from the release asset's HTTPS link, and must match the SHA-256 GitHub lists for the asset.
 <br>• It runs only after the user picks "Restart to update".

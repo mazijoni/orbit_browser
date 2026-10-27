@@ -405,6 +405,32 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
      - DevTools follow Orbit's theme (emulated `prefers-color-scheme` on the DevTools browser).
      - `zen` tests: can_dock + bridge + colour scheme, bottom / left / own window / right through DevTools' DockController, and the close button.
 
+- 0.1.7 (2026-10-27):
+  1. **Extensions without a popup** (Picture-in-Picture, ...) now get Chrome's toolbar click.
+     - Chrome only clicks an action through its toolbar's extensions container. `Extensions.triggerAction` (CDP) looks it up (`ExtensionsContainer::From(browser)`), and embedded browsers have none, so it crashes; it is also refused for a page's own DevTools session.
+     - Orbit holds a private DevTools connection to the browser over an anonymous pipe pair (`browser/cdp_pipe.*`; `--remote-debugging-pipe` with `--remote-debugging-io-pipes`, handles not inheritable, no port).
+     - `browser/extension_actions.*`:
+       - Finds the extension's service worker in the tab's browser context, starting it with `ServiceWorker.startWorker` if asleep.
+       - Attaches and maps the tab to the extension's tab id. Each Orbit tab is its own Chrome window, so `Browser.getWindowForTarget` gives `chrome.tabs.query({windowId})`.
+       - Dispatches `chrome.action.onClicked`.
+     - A shim in the worker wraps `chrome.scripting.executeScript` / `insertCSS`. They run as usual first; when Chrome refuses them for lack of the toolbar's activeTab grant, Orbit runs the same files / function in the page's main frame, in an isolated world, with a user gesture.
+       - That access lasts 5 minutes and only while the tab keeps its origin.
+       - http(s) pages only.
+     - Popups open on about:blank, get the same shim (plus `tabs.query({active, currentWindow})` = the Orbit tab) through `Page.addScriptToEvaluateOnNewDocument`, then load their page.
+     - `extensions` tests: a popup-less fixture (`tests/fixtures/extension_action`) marks the page with a user gesture, twice; the popup sees its tab and runs a script in it.
+     - `--orbit-no-devtools-pipe` turns the pipe off.
+  2. **Spelling suggestions.**
+     - Orbit's copy of the page menu showed Chromium's hidden spelling placeholders as empty rows. (Chromium fills them from the Windows spell checker after the menu is built.)
+     - Hidden items are now left out, and Orbit asks the Windows spell checker itself (`browser/spelling.*`, `ISpellChecker`, the profile's first spellcheck language).
+     - Suggestions go first in the menu; a click replaces the word (`ReplaceMisspelling`).
+     - `zen` test: "helo" suggests "hello".
+  3. **Stuck link text.**
+     - Chromium's status bubble (the hovered link's address, bottom left) is a popup of each tab's browser, never told when Orbit hides that page, so it stayed on screen.
+     - `Tab::Hide` now tells the page the pointer left, so Chromium hides it itself.
+     - `browser/status_bubbles.*` also notes the page each bubble appeared over (WinEvent hook) and hides it with that page.
+     - `zen` test: hover shows it, a tab switch takes it away, the next hover shows it again.
+  4. **Found, not fixed:** right after a web page, the next internal page's first API call can be refused (the frame URL is still the web page's; log line `rejected orbit://... (frame: web, header: 1)`). This makes the Release `services` test fail now and then; reloading the internal page fixes it. The `basic` H.264 recording test is also timing-sensitive in Release.
+
 ## Next actions
 
 1. Check by hand, with a real mouse: drag a tab out of the window onto the desktop (a linked window opens at the cursor), and onto another Orbit window (the tab moves there).

@@ -3,6 +3,9 @@
 #include "app/application.h"
 #include "browser/default_client.h"
 #include "app/self_test.h"
+#include "browser/cdp_pipe.h"
+#include "browser/extension_actions.h"
+#include "browser/status_bubbles.h"
 #include "app/updater.h"
 #include "browser/internal_pages.h"
 #include "core/strings.h"
@@ -475,6 +478,8 @@ void OrbitApp::OnRegisterCustomSchemes(CefRawPtr<CefSchemeRegistrar> registrar) 
 
 void OrbitApp::OnBeforeCommandLineProcessing(const CefString& process_type,
                                               CefRefPtr<CefCommandLine> command_line) {
+  // The browser's private DevTools pipe (extension toolbar actions).
+  if (process_type.empty()) cdp_pipe::Setup(command_line);
   // Self-test runs only: let fixture pages start audio without a user gesture
   // so media detection can be tested unattended. Never set for normal use.
   if (process_type.empty() && command_line->HasSwitch("orbit-self-test")) {
@@ -561,6 +566,8 @@ CefRefPtr<CefClient> OrbitApp::GetDefaultClient() {
 
 void OrbitApp::OnContextInitialized() {
   CefRefPtr<CefCommandLine> command_line = CefCommandLine::GetGlobalCommandLine();
+  extension_actions::Init();
+  status_bubbles::Install();
   Application::Get()->Start(UrlsFromCommandLine(command_line));
   // Self-tests only run against an explicitly chosen data directory.
   if (command_line->HasSwitch("orbit-self-test") && command_line->HasSwitch("user-data-dir")) {

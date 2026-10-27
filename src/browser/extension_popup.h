@@ -83,6 +83,8 @@ class ExtensionPopup : public CefClient,
   CefRefPtr<CefBrowser> browser_;
   bool closing_ = false;
   std::wstring title_;
+  std::string url_;          // the popup page, loaded once it has its tab context
+  int tab_browser_id_ = 0;   // the tab it was opened for
 
   IMPLEMENT_REFCOUNTING(ExtensionPopup);
 };

@@ -40,10 +40,14 @@ add_library(orbit SHARED
   app/orbit_app.cpp
   app/orbit.rc
   browser/browser_client.cpp
+  browser/cdp_pipe.cpp
   browser/library_client.cpp
+  browser/extension_actions.cpp
   browser/extension_bridge.cpp
   browser/extension_popup.cpp
   browser/default_client.cpp
+  browser/spelling.cpp
+  browser/status_bubbles.cpp
   browser/find_bar.cpp
   browser/live_folders.cpp
   browser/text_fetch.cpp

@@ -22,7 +22,8 @@ function Invoke-Suite([string] $suite, [string] $dataDir) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $suiteArgs = @("--user-data-dir=`"$dataDir`"", "--orbit-self-test=$suite")
   if ($suite -eq 'extensions') {
-    $suiteArgs += "--orbit-test-extension=`"$(Join-Path $root 'tests/fixtures/extension_basic')`""
+    # The basic fixture (popup, content script) and one whose action has no popup.
+    $suiteArgs += "--orbit-test-extension=`"$(Join-Path $root 'tests/fixtures/extension_basic'),$(Join-Path $root 'tests/fixtures/extension_action')`""
   }
   $p = Start-Process -FilePath $exe -PassThru -ArgumentList $suiteArgs
   if (-not $p.WaitForExit($TimeoutSec * 1000)) {

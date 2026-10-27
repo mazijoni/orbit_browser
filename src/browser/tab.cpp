@@ -6,6 +6,7 @@
 #include "app/application.h"
 #include "browser/browser_client.h"
 #include "browser/profile.h"
+#include "browser/status_bubbles.h"
 #include "core/log.h"
 #include "include/cef_devtools_message_observer.h"
 #include "core/strings.h"
@@ -516,6 +517,7 @@ void Tab::DestroyHostWhenGone(HWND host) {
 
 void Tab::DestroyHost() {
   if (host_) {
+    status_bubbles::HideFor(host_);
     ::RemovePropW(host_, kHostProp);
     ::ShowWindow(host_, SW_HIDE);
     DestroyHostWhenGone(host_);
@@ -596,7 +598,16 @@ void Tab::Show(const RECT& r, int corner_px) {
 }
 
 void Tab::Hide() {
+  // The pointer has left this page as far as it knows: Chromium clears the
+  // hovered link and hides its status bubble itself (it is not told that
+  // the page is hidden, so the bubble would stay). A bubble still up is
+  // hidden directly.
+  if (browser_ && host_ && ::IsWindowVisible(host_)) {
+    CefMouseEvent left;
+    browser_->GetHost()->SendMouseMoveEvent(left, /*mouse_leave=*/true);
+  }
   if (host_) ::ShowWindow(host_, SW_HIDE);
+  status_bubbles::HideFor(host_);
   HideDevToolsPane();
 }
 

@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Orbit Test Click Action",
+  "version": "1.0",
+  "description": "Used by the Orbit self-test suite 'extensions': an action without a popup (like Picture-in-Picture), it marks the page it was clicked on.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "action": {
+    "default_title": "Orbit Test Click"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

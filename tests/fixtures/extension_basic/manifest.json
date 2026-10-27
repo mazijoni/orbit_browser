@@ -4,7 +4,9 @@
   "version": "1.0",
   "description": "Used by the Orbit self-test suite 'extensions'.",
   "permissions": [
-    "storage"
+    "storage",
+    "activeTab",
+    "scripting"
   ],
   "content_scripts": [
     {

@@ -2,6 +2,7 @@
 
 #include "browser/boost_apply.h"
 #include "browser/password_vault.h"
+#include "browser/spelling.h"
 
 #include <cmath>
 
@@ -40,6 +41,11 @@ constexpr int kMenuCopyLink = MENU_ID_USER_FIRST + 5;
 constexpr int kMenuSearchSelection = MENU_ID_USER_FIRST + 6;
 constexpr int kMenuOpenImage = MENU_ID_USER_FIRST + 7;
 constexpr int kMenuCopyImageLink = MENU_ID_USER_FIRST + 8;
+constexpr int kMenuSpellFirst = MENU_ID_USER_FIRST + 20;  // .. + 4: spelling suggestions
+constexpr size_t kMaxSpellSuggestions = 5;
+// Chrome's IDC_SPELLCHECK_SUGGESTION_0 (cef_command_ids.h); its items come in
+// hidden and are filled after the menu is built.
+constexpr int kChromeSpellSuggestionFirst = 41000;
 
 bool CopyText(HWND owner, const std::wstring& text) {
   bool open = false;
@@ -78,13 +84,24 @@ std::wstring AcceleratorText(int key, bool shift, bool ctrl, bool alt) {
 // CEF's menu model as an HMENU for ui::TrackMenu (ids are CEF's).
 HMENU BuildMenu(CefRefPtr<CefMenuModel> model) {
   HMENU menu = ::CreatePopupMenu();
+  bool separator_pending = false;  // only between shown items, never doubled
+  bool any = false;
   for (size_t i = 0; i < model->GetCount(); ++i) {
     const cef_menu_item_type_t type = model->GetTypeAt(i);
+    // Chromium keeps some items hidden (its spelling suggestions until they
+    // arrive): they are not shown, nor left as empty rows.
+    if (!model->IsVisibleAt(i)) continue;
     const UINT grayed = model->IsEnabledAt(i) ? 0 : MF_GRAYED;
     std::wstring label = model->GetLabelAt(i).ToWString();
     if (type == MENUITEMTYPE_SEPARATOR) {
-      ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    } else if (type == MENUITEMTYPE_SUBMENU) {
+      separator_pending = any;
+      continue;
+    }
+    if (type != MENUITEMTYPE_SUBMENU && label.empty()) continue;
+    if (separator_pending) ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    separator_pending = false;
+    any = true;
+    if (type == MENUITEMTYPE_SUBMENU) {
       ::AppendMenuW(menu, MF_POPUP | grayed, reinterpret_cast<UINT_PTR>(BuildMenu(model->GetSubMenuAt(i))),
                     label.c_str());
     } else if (type == MENUITEMTYPE_COMMAND || type == MENUITEMTYPE_CHECK || type == MENUITEMTYPE_RADIO) {
@@ -115,6 +132,51 @@ void BrowserClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr
   if (!tab || !WindowFor(tab)) return;
   const int flags = params->GetTypeFlags();
   size_t at = 0;
+  // Spelling: the misspelled word's suggestions first, as in Chrome. Chrome's
+  // own come from the Windows spell checker after the menu is built; Orbit
+  // asks it now (or uses the renderer's, when it has them).
+  spell_suggestions_.clear();
+  const std::wstring misspelled = params->GetMisspelledWord().ToWString();
+  if (!misspelled.empty()) {
+    bool chrome_has_them = false;
+    for (size_t i = 0; i < model->GetCount(); ++i) {
+      const int id = model->GetCommandIdAt(i);
+      if (id >= kChromeSpellSuggestionFirst && id < kChromeSpellSuggestionFirst + 5 && model->IsVisibleAt(i) &&
+          !model->GetLabelAt(i).empty()) {
+        chrome_has_them = true;
+      }
+    }
+    if (!chrome_has_them) {
+      std::vector<CefString> from_renderer;
+      params->GetDictionarySuggestions(from_renderer);
+      for (const CefString& word : from_renderer) {
+        if (spell_suggestions_.size() < kMaxSpellSuggestions) spell_suggestions_.push_back(word.ToWString());
+      }
+      if (spell_suggestions_.empty()) {
+        std::wstring language = L"en-US";
+        if (CefRefPtr<CefValue> dictionaries = tab->profile() && tab->profile()->request_context()
+                                                     ? tab->profile()->request_context()->GetPreference("spellcheck.dictionaries")
+                                                     : nullptr;
+            dictionaries && dictionaries->GetType() == VTYPE_LIST && dictionaries->GetList()->GetSize() > 0) {
+          language = dictionaries->GetList()->GetString(0).ToWString();
+        }
+        spell_suggestions_ = spelling::Suggest(misspelled, language, kMaxSpellSuggestions);
+      }
+      for (size_t i = 0; i < spell_suggestions_.size(); ++i) {
+        std::wstring label;
+        for (wchar_t ch : spell_suggestions_[i]) {
+          if (ch == L'&') label += L'&';
+          label += ch;
+        }
+        model->InsertItemAt(at++, kMenuSpellFirst + static_cast<int>(i), label);
+      }
+      if (spell_suggestions_.empty()) {
+        model->InsertItemAt(at, kMenuSpellFirst, "No spelling suggestions");
+        model->SetEnabledAt(at++, false);
+      }
+      model->InsertSeparatorAt(at++);
+    }
+  }
   if ((flags & CM_TYPEFLAG_LINK) && IsWebLink(params->GetLinkUrl().ToWString())) {
     // Firefox's link items, and canOpenLinkInSplitView / Glance (Zen).
     model->InsertItemAt(at++, kMenuNewTabLink, "Open Link in New &Tab");
@@ -161,10 +223,15 @@ void BrowserClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr
 }
 
 bool BrowserClient::RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>,
-                                   CefRefPtr<CefContextMenuParams>, CefRefPtr<CefMenuModel> model,
+                                   CefRefPtr<CefContextMenuParams> params, CefRefPtr<CefMenuModel> model,
                                    CefRefPtr<CefRunContextMenuCallback> callback) {
   Tab* tab = FindTab(browser->GetIdentifier());
   if (!WindowFor(tab) || model->GetCount() == 0) return false;
+  if (test_menu_observer) {
+    test_menu_observer(model, params);
+    callback->Cancel();
+    return true;
+  }
   HMENU menu = BuildMenu(model);
   POINT pt;
   ::GetCursorPos(&pt);
@@ -189,6 +256,11 @@ bool BrowserClient::RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefF
 bool BrowserClient::OnContextMenuCommand(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>,
                                          CefRefPtr<CefContextMenuParams> params, int command_id,
                                          EventFlags) {
+  if (command_id >= kMenuSpellFirst && command_id < kMenuSpellFirst + static_cast<int>(kMaxSpellSuggestions)) {
+    const size_t i = static_cast<size_t>(command_id - kMenuSpellFirst);
+    if (i < spell_suggestions_.size()) browser->GetHost()->ReplaceMisspelling(spell_suggestions_[i]);
+    return true;
+  }
   if (command_id < kMenuSplitLink || command_id > kMenuCopyImageLink) return false;
   Tab* tab = FindTab(browser->GetIdentifier());
   BrowserWindow* w = WindowFor(tab);

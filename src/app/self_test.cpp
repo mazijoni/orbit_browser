@@ -17,10 +17,13 @@
 #include "app/application.h"
 #include "app/installer.h"
 #include "app/test_http_server.h"
+#include "browser/extension_actions.h"
+#include "core/json.h"
 #include "app/updater.h"
 #include "browser/downloads.h"
 #include "browser/password_vault.h"
 #include "browser/permissions.h"
+#include "browser/spelling.h"
 #include "core/process_metrics.h"
 #include "browser/browser_client.h"
 #include "app/orbit_app.h"
@@ -189,7 +192,27 @@ class SetCookieDone : public CefSetCookieCallback {
 
 // --- Suites ----------------------------------------------------------------
 
-std::string DescribeWindows();  // every visible window of this process (diagnostics)
+std::string DescribeWindows();
+// Chromium link-status bubbles of |owner| on screen (one-line click-through
+// tool popups it owns).
+int VisibleStatusBubbles(HWND owner) {
+  struct Ctx { HWND owner; int count; };
+  Ctx ctx{owner, 0};
+  ::EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+    auto* c = reinterpret_cast<Ctx*>(lp);
+    wchar_t cls[32] = {};
+    ::GetClassNameW(h, cls, 32);
+    RECT rc;
+    ::GetWindowRect(h, &rc);
+    const LONG_PTR ex = ::GetWindowLongPtrW(h, GWL_EXSTYLE);
+    if (::GetWindow(h, GW_OWNER) == c->owner && std::wstring(cls) == L"Chrome_WidgetWin_1" && ::IsWindowVisible(h) &&
+        (ex & WS_EX_TRANSPARENT) && (ex & WS_EX_NOACTIVATE) && rc.bottom - rc.top < 60) {
+      ++c->count;
+    }
+    return TRUE;
+  }, reinterpret_cast<LPARAM>(&ctx));
+  return ctx.count;
+}  // every visible window of this process (diagnostics)
 
 void AddBasicSuite(Runner& r) {
   Application* app = Application::Get();
@@ -3324,6 +3347,7 @@ void AddZenSuite(Runner& r) {
   // Sign-in popups appear as a glance over the page that opened them.
   struct Pop {
     Tab* opener = nullptr;
+    Tab* other = nullptr;
     size_t windows = 0;
     TestHttpServer server;
   };
@@ -3556,6 +3580,50 @@ void AddZenSuite(Runner& r) {
     passwords::ClearPendingOffer();
     return true;
   }, 30000);
+  // Spelling suggestions come from the Windows spell checker (Chromium's own
+  // are filled in after the page menu has been copied, so it showed empty rows).
+  r.Add("spelling: suggestions for a misspelled word", [&r] {
+    const auto words = spelling::Suggest(L"helo", L"en-US");
+    std::string list;
+    for (const auto& w : words) list += N(w) + " ";
+    r.Log("  info " + list);
+    r.Check(!words.empty() && std::find(words.begin(), words.end(), L"hello") != words.end(),
+            "\"helo\" suggests \"hello\"");
+    r.Check(spelling::Suggest(L"", L"en-US").empty() && spelling::Suggest(L"helo", L"xx-XX").empty(),
+            "nothing for no word or an unknown language");
+  });
+  // Chromium's link-status bubble goes with its page: switching tabs while it
+  // shows a link must not leave it on screen.
+  r.Add("status bubble: hovering a link shows its address", [s, pp] {
+    pp->opener = s->window->OpenTab(pp->server.Url(L"/popupbtn"), true);
+  }, [s, pp] {
+    if (pp->opener->loading() || !pp->opener->browser()) return false;
+    if (VisibleStatusBubbles(s->window->hwnd()) > 0) return true;
+    static int n = 0;
+    CefMouseEvent e;
+    e.x = 50 + (++n % 20);
+    e.y = 60;
+    e.modifiers = 0;
+    pp->opener->browser()->GetHost()->SendMouseMoveEvent(e, false);
+    return false;
+  }, 10000);
+  r.Add("... switching tabs takes it away", [s, pp] {
+    pp->other = s->window->OpenTab(L"orbit://selftest/?t=Other", true);
+  }, [s, pp] { return VisibleStatusBubbles(s->window->hwnd()) == 0; }, 5000);
+  r.Add("... and the page's next hover shows it again", [s, pp] { s->window->ActivateTab(pp->opener); }, [s, pp] {
+    if (VisibleStatusBubbles(s->window->hwnd()) > 0) {
+      s->window->CloseTabShortcut(pp->other);
+      s->window->CloseTabShortcut(pp->opener);
+      return true;
+    }
+    static int n = 0;
+    CefMouseEvent e;
+    e.x = 120 + (++n % 20);
+    e.y = 80;
+    e.modifiers = 0;
+    pp->opener->browser()->GetHost()->SendMouseMoveEvent(e, false);
+    return false;
+  }, 10000);
   // Saving a new login after sign-in.
   struct Login {
     Tab* tab = nullptr;
@@ -3733,13 +3801,14 @@ void AddExtensionsSuite(Runner& r) {
     static bool asked = false;
     if (!asked) {
       asked = true;
-      run_js(s->manager, "setTimeout(() => { const c = document.querySelectorAll('[role=listitem]');"
-                         "document.title = 'CARDS:' + c.length + ':' + (c[0] ? c[0].innerText.slice(0, 60) : ''); }, 600);");
+      run_js(s->manager, "setTimeout(() => { const c = [...document.querySelectorAll('[role=listitem]')];"
+                         "const mine = c.find((e) => e.innerText.startsWith('Orbit Test Extension'));"
+                         "document.title = 'CARDS:' + c.length + ':' + (mine ? mine.innerText.slice(0, 60) : ''); }, 600);");
       return false;
     }
     const std::wstring& t = s->manager->record().title;
     if (t.rfind(L"CARDS:", 0) != 0) return false;
-    r.Check(t.rfind(L"CARDS:1:Orbit Test Extension", 0) == 0, "one card, named (" + N(t) + ")");
+    r.Check(t.rfind(L"CARDS:2:Orbit Test Extension", 0) == 0, "a card for each fixture, named (" + N(t) + ")");
     return true;
   }, 15000);
   r.Add("turning it off stops its scripts, turning it on restores them", [s, app, fixture] {
@@ -3826,11 +3895,63 @@ void AddExtensionsSuite(Runner& r) {
     }
     const std::wstring title = ExtensionPopup::CurrentTitle();
     if (title.rfind(L"POPUP:", 0) != 0) return false;
-    r.Check(title.rfind(L"POPUP:", 0) == 0, "the popup page ran with the extension APIs (" + N(title) + ")");
+    r.Check(title.rfind(L"POPUP:1:", 0) == 0 && title.find(L"PopupTarget") != std::wstring::npos,
+            "the popup's current tab is the page it was opened for, and a script ran in it (" + N(title) + ")");
     r.Check(ExtensionPopup::CurrentWindow() != nullptr && ::IsWindowVisible(ExtensionPopup::CurrentWindow()), "shown");
     return true;
   }, 20000);
   r.Add("... and closes", [] { ExtensionPopup::CloseCurrent(); }, [] { return !ExtensionPopup::Alive(); }, 10000);
+  // An action without a popup (Picture-in-Picture, ...): Chrome's toolbar
+  // click, with the page access (activeTab) and the user gesture it brings.
+  auto clicked = std::make_shared<int>(0);  // 1 ok, -1 failed
+  r.Add("an extension without a popup gets the toolbar click on the page", [s, &r] {
+    s->page = s->window->OpenTab(s->server.Url(L"/page?t=ClickTarget"), true);
+  }, [s, clicked, &r] {
+    static bool sent = false;
+    if (s->page->loading() || !s->page->browser() || s->page->record().title.empty()) return false;
+    if (!sent) {
+      std::string id;
+      for (const ExtensionInfo& e : Application::Get()->Extensions(s->profile)->extensions()) {
+        if (e.name == "Orbit Test Click Action") {
+          id = e.id;
+          r.Check(e.popup.empty(), "the fixture has no popup");
+        }
+      }
+      if (id.empty()) return false;
+      sent = true;
+      extension_actions::Click(s->page, id, [clicked, &r](bool ok, const std::string& error) {
+        *clicked = ok ? 1 : -1;
+        if (!ok) r.Log("  info click failed: " + error);
+      });
+      return false;
+    }
+    if (*clicked == 0) return false;
+    r.Check(*clicked == 1, "the click reached the extension");
+    if (*clicked != 1) return true;
+    if (s->page->record().title.rfind(L"ACTION-CLICKED", 0) != 0) return false;
+    r.Check(s->page->record().title == L"ACTION-CLICKED:true",
+            "its script ran in the page, with a user gesture (" + N(s->page->record().title) + ")");
+    return true;
+  }, 20000);
+  r.Add("... a second click works too (the worker is reused)", [s, clicked] {
+    *clicked = 0;
+    s->page->browser()->GetMainFrame()->ExecuteJavaScript("document.title = 'again'", "", 0);
+  }, [s, clicked, &r] {
+    static bool sent = false;
+    if (s->page->record().title != L"again" && !sent) return false;
+    if (!sent) {
+      sent = true;
+      for (const ExtensionInfo& e : Application::Get()->Extensions(s->profile)->extensions()) {
+        if (e.name == "Orbit Test Click Action") {
+          extension_actions::Click(s->page, e.id, [clicked](bool ok, const std::string&) { *clicked = ok ? 1 : -1; });
+        }
+      }
+      return false;
+    }
+    if (*clicked == 0 || s->page->record().title.rfind(L"ACTION-CLICKED", 0) != 0) return *clicked == -1;
+    r.Check(*clicked == 1 && s->page->record().title == L"ACTION-CLICKED:true", "marked again");
+    return true;
+  }, 20000);
   r.Add("an extension page cannot call orbit:// APIs", [s] {
     s->ext_page = s->window->OpenTab(FromUtf8("chrome-extension://" + s->id + "/popup.html"), true);
   }, [s, &r, run_js] {

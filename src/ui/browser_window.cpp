@@ -16,6 +16,7 @@
 #include "browser/profile.h"
 #include "browser/tab.h"
 #include "browser/browser_client.h"
+#include "browser/extension_actions.h"
 #include "browser/extension_bridge.h"
 #include "browser/extension_popup.h"
 #include "browser/find_bar.h"
@@ -7458,16 +7459,20 @@ const ExtensionInfo* BrowserWindow::PinnedExtension(int index) const {
 
 void BrowserWindow::OpenExtensionAction(const ExtensionInfo& extension, const D2D1_RECT_F& anchor) {
   if (extension.popup.empty()) {
-    // Without a popup Chrome would send the extension a click Orbit cannot
-    // deliver; its options are the next best thing.
-    if (!extension.options_url.empty()) {
-      OpenTab(FromUtf8(extension.options_url), true);
-    } else {
-      ui::Toast::Content content;
-      content.id = L"extension-no-popup";
-      content.text = FromUtf8(extension.name) + L" has no menu here";
-      ShowToast(content);
-    }
+    // No popup: the extension gets Chrome's toolbar click on the current tab
+    // (Picture-in-Picture and the like).
+    const HWND self = hwnd_;
+    const std::wstring name = FromUtf8(extension.name);
+    extension_actions::Click(active_tab(), extension.id, [self, name](bool ok, const std::string&) {
+      if (ok) return;
+      for (const auto& w : Application::Get()->windows()) {
+        if (w->hwnd() != self || w->closing()) continue;
+        ui::Toast::Content content;
+        content.id = L"extension-click-failed";
+        content.text = name + L" could not run on this page";
+        w->ShowToast(content);
+      }
+    });
     return;
   }
   POINT below{static_cast<LONG>(px(anchor.left)), static_cast<LONG>(px(anchor.bottom + 6))};

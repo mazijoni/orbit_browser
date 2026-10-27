@@ -1,5 +1,7 @@
 #include "core/json.h"
 
+#include <charconv>
+#include <cstdio>
 #include <cstdlib>
 
 namespace orbit {
@@ -218,6 +220,54 @@ const JsonValue* JsonValue::Get(std::string_view key) const {
 const std::string& JsonValue::Str(std::string_view key) const {
   const JsonValue* v = Get(key);
   return v && v->type == Type::kString ? v->string : kEmpty;
+}
+
+std::string JsonQuote(std::string_view text) {
+  std::string out = "\"";
+  for (const char c : text) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char hex[8];
+          std::snprintf(hex, sizeof(hex), "\\u%04x", static_cast<unsigned>(static_cast<unsigned char>(c)));
+          out += hex;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out + "\"";
+}
+
+std::string ToJson(const JsonValue& v) {
+  switch (v.type) {
+    case JsonValue::Type::kNull: return "null";
+    case JsonValue::Type::kBool: return v.boolean ? "true" : "false";
+    case JsonValue::Type::kNumber: {
+      char buf[32];
+      const auto r = std::to_chars(buf, buf + sizeof(buf), v.number);
+      return r.ec == std::errc() ? std::string(buf, r.ptr) : "null";
+    }
+    case JsonValue::Type::kString: return JsonQuote(v.string);
+    case JsonValue::Type::kArray: {
+      std::string out = "[";
+      for (size_t i = 0; i < v.array.size(); ++i) out += (i ? "," : "") + ToJson(v.array[i]);
+      return out + "]";
+    }
+    case JsonValue::Type::kObject: {
+      std::string out = "{";
+      for (size_t i = 0; i < v.object.size(); ++i) {
+        out += (i ? "," : "") + JsonQuote(v.object[i].first) + ":" + ToJson(v.object[i].second);
+      }
+      return out + "}";
+    }
+  }
+  return "null";
 }
 
 std::optional<JsonValue> ParseJson(std::string_view text, int max_depth) {
