@@ -797,8 +797,8 @@ void BrowserWindow::PaintSpaceArea(ID2D1RenderTarget* rt) {
 
 void BrowserWindow::DrawWorkspaceIcon(ID2D1RenderTarget* rt, const std::wstring& icon,
                                       const D2D1_RECT_F& r, float size, float opacity) {
-  // Emoji draw in color (D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT); other
-  // characters use the text color.
+  // One color, as Zen draws space icons: an emoji is drawn from its outline
+  // (no D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT) in the text color.
   using Microsoft::WRL::ComPtr;
   auto& g = ui::Graphics::Get();
   ComPtr<IDWriteTextFormat> format;
@@ -814,7 +814,7 @@ void BrowserWindow::DrawWorkspaceIcon(ID2D1RenderTarget* rt, const std::wstring&
   c.a *= opacity;
   brush_->SetColor(c);
   rt->DrawText(icon.c_str(), static_cast<UINT32>(icon.size()), format.Get(), r, brush_.Get(),
-               static_cast<D2D1_DRAW_TEXT_OPTIONS>(D2D1_DRAW_TEXT_OPTIONS_CLIP | 4 /* ENABLE_COLOR_FONT */));
+               D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 void BrowserWindow::PaintEssentials(ID2D1RenderTarget* rt) {

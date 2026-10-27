@@ -379,6 +379,29 @@ void AddBasicSuite(Runner& r) {
     r.Check(t.find(L"vp9=no") == std::wstring::npos, "VP9 is playable");
     return true;
   });
+  // Sites' bot checks (Cloudflare Turnstile): a page must see a normal
+  // browser, never an automated one.
+  auto bot_server = std::make_shared<TestHttpServer>();
+  r.Add("a page sees a normal browser, not an automated one", [s, bot_server, &r] {
+    r.Check(bot_server->Start(), "test HTTP server listening");
+    s->window->active_tab()->Navigate(bot_server->Url(L"/botcheck"));
+  }, [s, &r] {
+    const std::wstring& t = s->window->active_tab()->record().title;
+    if (!t.starts_with(L"BOT:")) return false;
+    r.Log("  info " + N(t));
+    r.Check(t.find(L"wd=false") != std::wstring::npos, "navigator.webdriver is false");
+    r.Check(t.find(L"chrome=object") != std::wstring::npos, "window.chrome exists");
+    r.Check(t.find(L"plugins=0") == std::wstring::npos, "PDF viewer plugins are listed");
+    r.Check(t.find(L"cdc=|") != std::wstring::npos || t.ends_with(L"cdc="), "no automation globals");
+    // Headless browsers give themselves away with a notification permission
+    // that differs between the two ways of asking.
+    const size_t n = t.find(L"|notif=");
+    const std::wstring notif = n == std::wstring::npos ? L"" : t.substr(n + 7, t.find(L'|', n + 1) - n - 7);
+    const size_t slash = notif.find(L'/');
+    const std::wstring a1 = notif.substr(0, slash), a2 = slash == std::wstring::npos ? L"" : notif.substr(slash + 1);
+    r.Check((a1 == L"default" && a2 == L"prompt") || a1 == a2, "notification permission is consistent (" + N(notif) + ")");
+    return true;
+  });
   auto media_server = std::make_shared<TestHttpServer>();
   r.Add("media: an H.264 clip plays", [s, media_server, &r] {
     r.Check(media_server->Start(), "test HTTP server listening");
@@ -1181,6 +1204,21 @@ void AddZenSuite(Runner& r) {
     r.Check(cached && cached->width > 0 && cached->bgra.size() == ic->tab->favicon().bgra.size(),
             "the icon's pixels are in the database");
     return true;
+  }, 15000);
+  r.Add("... another site in the tab does not keep (or remember) it", [ic] {
+    std::wstring url = ic->server.Url(L"/page?t=OtherSite");
+    url.replace(url.find(L"127.0.0.1"), 9, L"localhost");
+    ic->tab->Navigate(url);
+  }, [ic, &r] {
+    if (ic->tab->loading() || ic->tab->record().title != L"OtherSite") return false;
+    r.Check(ic->tab->favicon().bgra.empty(), "the first site's icon is gone");
+    r.Check(ic->tab->record().favicon_url.find(L"data:image/png") == std::wstring::npos,
+            "and is not stored for the new page");
+    ic->tab->Navigate(ic->server.Url(L"/iconpage"));
+    return true;
+  }, 15000);
+  r.Add("... (back on the page with the icon)", nullptr, [ic] {
+    return !ic->tab->loading() && !ic->tab->favicon().bgra.empty();
   }, 15000);
   r.Add("... a tab restored from its record has the icon before loading", [s, ic, &r] {
     Tab restored(s->window->workspace(), ic->tab->record());
@@ -4028,6 +4066,59 @@ std::string DescribeWindows() {
   return ctx.out;
 }
 
+// Manual (needs the internet): a real Cloudflare Turnstile widget passes
+// (its response token is filled) without a verify loop.
+void AddTurnstileSuite(Runner& r) {
+  struct State {
+    BrowserWindow* window = nullptr;
+    Tab* tab = nullptr;
+    int clicks = 0;
+  };
+  auto s = std::make_shared<State>();
+  r.Add("a Turnstile demo page passes", [s] {
+    s->window = FirstWindowOf(Application::Get()->profiles().front().get());
+    s->tab = s->window->OpenTab(L"https://2captcha.com/demo/cloudflare-turnstile", true);
+  }, [s, &r] {
+    static ULONGLONG asked = 0;
+    if (s->tab->loading() || !s->tab->browser()) return false;
+    if (::GetTickCount64() - asked > 1500) {
+      asked = ::GetTickCount64();
+      s->tab->browser()->GetMainFrame()->ExecuteJavaScript(
+          "{const i=document.querySelector('[name=cf-turnstile-response]');"
+          "const f=document.querySelector('iframe[src*=challenges]');const b=f&&f.getBoundingClientRect();"
+          "document.title='TS:'+(i&&i.value?'token':'none')+':'+(b?Math.round(b.left+30)+','+Math.round(b.top+b.height/2):'noframe');}",
+          "", 0);
+    }
+    const std::wstring t = s->tab->record().title;
+    if (t.rfind(L"TS:token", 0) == 0) {
+      r.Log("  info passed after " + std::to_string(s->clicks) + " click(s)");
+      r.Check(true, "Turnstile gave its token");
+      return true;
+    }
+    // An interactive challenge: click its checkbox once it shows, as a person would.
+    static ULONGLONG shown_at = 0;
+    if (t.rfind(L"TS:none:", 0) == 0 && t.find(L"noframe") == std::wstring::npos) {
+      if (!shown_at) shown_at = ::GetTickCount64();
+      if (s->clicks < 3 && ::GetTickCount64() - shown_at > 4000 + 6000ull * s->clicks) {
+        int x = 0, y = 0;
+        if (std::swscanf(t.c_str() + 8, L"%d,%d", &x, &y) == 2) {
+          ++s->clicks;
+          r.Log("  info clicking the checkbox at " + std::to_string(x) + "," + std::to_string(y));
+          CefMouseEvent e;
+          e.x = x;
+          e.y = y;
+          e.modifiers = 0;
+          CefRefPtr<CefBrowserHost> host = s->tab->browser()->GetHost();
+          host->SendMouseMoveEvent(e, false);
+          host->SendMouseClickEvent(e, MBT_LEFT, false, 1);
+          host->SendMouseClickEvent(e, MBT_LEFT, true, 1);
+        }
+      }
+    }
+    return false;
+  }, 60000);
+}
+
 void AddStoreInstallSuite(Runner& r) {
   struct State {
     BrowserWindow* window = nullptr;
@@ -4124,6 +4215,8 @@ void Start(const std::wstring& suite) {
     AddExtensionsSuite(*g_runner);
   } else if (suite == L"store-install") {
     AddStoreInstallSuite(*g_runner);
+  } else if (suite == L"turnstile") {
+    AddTurnstileSuite(*g_runner);
   } else {
     g_runner->Check(false, "unknown suite " + N(suite));
   }

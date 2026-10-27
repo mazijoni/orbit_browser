@@ -188,6 +188,18 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
     body = "<!doctype html><title>spell</title><style>body{margin:0}textarea{width:600px;height:200px;"
            "font:32px sans-serif;border:0;padding:0}</style><textarea id=t spellcheck=true autofocus>"
            "helo wrold teh</textarea><script>t.focus();t.setSelectionRange(14,14);</script>";
+  } else if (path == "/botcheck") {
+    // What bot checks (Cloudflare Turnstile and the like) look at.
+    body = "<!doctype html><title>botcheck</title><script>(async () => {"
+           "const d = navigator.userAgentData;"
+           "const hi = d ? await d.getHighEntropyValues(['fullVersionList','platform']) : {};"
+           "document.title = 'BOT:wd=' + navigator.webdriver + '|chrome=' + (typeof window.chrome) +"
+           "'|plugins=' + navigator.plugins.length + '|langs=' + navigator.languages.join(',') +"
+           "'|brands=' + (d ? d.brands.map(b => b.brand + '/' + b.version).join(',') : 'none') +"
+           "'|full=' + (hi.fullVersionList ? hi.fullVersionList.map(b => b.brand).join(',') : '') +"
+           "'|notif=' + Notification.permission + '/' + (await navigator.permissions.query({name: 'notifications'})).state +"
+           "'|ua=' + navigator.userAgent + '|cdc=' + Object.keys(window).filter(k => /cdc_|domAutomation/.test(k)).join(',');"
+           "})()</script>";
   } else if (path == "/text") {
     // /text?t=<title>&body=<text>: a page of plain text (find in page).
     body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) + "</title><body><p>" +

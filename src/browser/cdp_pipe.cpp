@@ -90,6 +90,12 @@ void Setup(CefRefPtr<CefCommandLine> command_line) {
           std::to_string(reinterpret_cast<uintptr_t>(browser_writes)));
   // Lets pipe clients (only) use the Extensions domain.
   command_line->AppendSwitch("enable-unsafe-extension-debugging");
+  // A debugging pipe marks the browser as automated to every page
+  // (navigator.webdriver = true), which bot checks such as Cloudflare
+  // Turnstile fail or loop on. Orbit is not automated: pages never see it.
+  std::string disabled = command_line->GetSwitchValue("disable-blink-features").ToString();
+  disabled += (disabled.empty() ? "" : ",") + std::string("AutomationControlled");
+  command_line->AppendSwitchWithValue("disable-blink-features", disabled);
   std::thread(&ReadLoop).detach();
 }
 

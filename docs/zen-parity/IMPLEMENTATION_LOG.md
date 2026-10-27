@@ -431,6 +431,18 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
      - `zen` test: hover shows it, a tab switch takes it away, the next hover shows it again.
   4. **Found, not fixed:** right after a web page, the next internal page's first API call can be refused (the frame URL is still the web page's; log line `rejected orbit://... (frame: web, header: 1)`). This makes the Release `services` test fail now and then; reloading the internal page fixes it. The `basic` H.264 recording test is also timing-sensitive in Release.
 
+- 0.1.8 (2026-10-27):
+  1. **Cloudflare "verify you are human" failing or looping.**
+     - 0.1.7's private DevTools pipe made Chromium mark the browser as automated to every page: `navigator.webdriver = true`, the first thing bot checks look at.
+     - `cdp_pipe::Setup` now also passes `--disable-blink-features=AutomationControlled`, so pages see `false` and the pipe keeps working.
+     - `basic` test "a page sees a normal browser": `navigator.webdriver` false, `window.chrome` present, PDF plugins listed, no automation globals, notification permission consistent (`default` / `prompt`).
+     - Manual suite `turnstile` (internet): a real Turnstile widget (2captcha's demo) gives its token. That demo also passed with the flag on, so it is not strict; Cloudflare's full-page managed challenges are stricter.
+  2. **Wrong site icons.**
+     - A tab kept the previous site's icon until the new page named one. If it never did (no icon, error page, PDF), the old icon stayed and was saved as the new page's (`favicon_url`), so the favicon cache brought it back after a restart.
+     - `Tab::OnAddressChange` now drops the icon and its URL as soon as the host changes (`favicon_host_`).
+     - `zen` test: an icon page, then another host in the same tab, has no icon and stores none.
+  3. **Space icons in one color.** Space and folder icons are drawn from the emoji's outline in the text color (no `ENABLE_COLOR_FONT`), as Zen does. The Library's Spaces cards use the text presentation (`U+FE0E`, `font-variant-emoji: text`).
+
 ## Next actions
 
 1. Check by hand, with a real mouse: drag a tab out of the window onto the desktop (a linked window opens at the cursor), and onto another Orbit window (the tab moves there).

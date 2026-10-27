@@ -281,6 +281,7 @@ class Tab {
   SecurityLevel security_ = SecurityLevel::kNone;
   std::wstring title_live_;
   FaviconPixels favicon_;
+  std::wstring favicon_host_;  // the site the icon belongs to
   std::wstring pending_url_;  // URL to load once a newly created browser exists
 };
 

@@ -16,6 +16,7 @@ namespace orbit::self_test {
 //   /signin                        sign-in popup: submit messages the opener and closes at once
 //   /signin-nav, /signin-done      sign-in popup that posts, then messages the opener and closes
 //   /fullscreen                    a button that requests page fullscreen (title fs-on / fs-off)
+//   /botcheck                      what bot checks see (title BOT:...)
 //   /spell                         a focused text box with misspelled words
 //   /iconpage                      a page with a red 16x16 favicon
 //   /login-nav                     a sign-in form that posts and navigates

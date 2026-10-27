@@ -71,6 +71,7 @@ input[type=search]{width:100%;margin:0 0 6px;background:color-mix(in srgb,curren
 .space{margin:0 0 8px;padding:8px;border-radius:12px;background:color-mix(in srgb,currentColor 5%,transparent)}
 .space[data-current=true]{outline:2px solid color-mix(in srgb,var(--accent) 60%,transparent)}
 .space header{display:flex;align-items:center;gap:8px;padding:4px 6px 8px;font-weight:600;cursor:default}
+.space header .icon{font-variant-emoji:text;font-family:"Segoe UI Symbol","Segoe UI Emoji",sans-serif}
 .space header .badge{font-size:11px;font-weight:500;color:var(--muted)}
 .space header:hover{color:var(--accent)}
 .menu{position:absolute;right:18px;top:52px;background:var(--surface2);border-radius:10px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.3);z-index:2}
@@ -118,7 +119,9 @@ async function showSpaces() {
   for (const s of spaces) {
     const card = el('div', {className: 'space'});
     card.dataset.current = String(s.current);
-    const head = el('header', null, el('span', {textContent: s.icon || '•'}),
+    // One color, as in the sidebar: the emoji's text presentation.
+    const icon = s.icon ? s.icon.replace(/\uFE0F/g, '') + '\uFE0E' : '\u2022';
+    const head = el('header', null, el('span', {className: 'icon', textContent: icon}),
         el('span', {className: 't', textContent: s.name}),
         el('span', {className: 'badge', textContent: s.tabs.length + (s.tabs.length === 1 ? ' tab' : ' tabs')}));
     head.onclick = () => orbitAction('/api/spaces/show', {space: s.id, tab: -1});

@@ -160,8 +160,20 @@ class FaviconCallback : public CefDownloadImageCallback {
 
 }  // namespace
 
+namespace {
+// "example.com" for "https://example.com:8080/path" (lower case), or empty.
+std::wstring HostOf(const std::wstring& url) {
+  const size_t scheme = url.find(L"://");
+  if (scheme == std::wstring::npos) return {};
+  const size_t start = scheme + 3;
+  const size_t end = url.find_first_of(L":/?#", start);
+  return ToLowerAscii(url.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start));
+}
+}  // namespace
+
 Tab::Tab(Workspace* workspace, TabRecord record)
     : workspace_(workspace), record_(std::move(record)) {
+  favicon_host_ = HostOf(record_.url);
   // A restored tab has no page yet: its icon comes from the favicon cache.
   if (!record_.favicon_url.empty() && profile() && !profile()->is_private()) {
     if (auto cached = Application::Get()->store().LoadFavicon(record_.favicon_url)) {
@@ -877,6 +889,18 @@ void Tab::OnAddressChange(const std::wstring& url) {
     Application::Get()->Extensions(profile());
   }
   if (url != Application::kNewTabUrl) empty_placeholder_ = false;
+  // Another site: the previous site's icon goes now, not when (or if) the new
+  // page names its own. It stayed, and was even remembered for the new page.
+  if (const std::wstring host = HostOf(url); host != favicon_host_) {
+    favicon_host_ = host;
+    if (!favicon_.bgra.empty() || !record_.favicon_url.empty()) {
+      favicon_.bgra.clear();
+      favicon_.width = favicon_.height = 0;
+      ++favicon_.generation;
+      record_.favicon_url.clear();
+      MarkDirty();
+    }
+  }
   if (record_.url != url) {
     record_.url = url;
     MarkDirty();
@@ -925,6 +949,7 @@ void Tab::OnFaviconUrl(const std::wstring& url) {
     NotifyChanged();
   }
   record_.favicon_url = url;
+  favicon_host_ = HostOf(record_.url);
   MarkDirty();
   if (browser_ && !url.empty()) {
     browser_->GetHost()->DownloadImage(url, true, 32, false,
