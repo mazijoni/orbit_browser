@@ -1246,6 +1246,36 @@ void AddZenSuite(Runner& r) {
     }
     return true;
   }, 10000);
+  r.Add("Settings imports a passwords file (.csv)", [s] {
+    s->tab = s->window->OpenTab(L"orbit://settings/", true);
+  }, [s, app, &r] {
+    if (s->tab->loading() || !s->tab->browser()) return false;
+    const std::wstring& t = s->tab->record().title;
+    static ULONGLONG sent = 0;
+    if (t.rfind(L"CSV:", 0) != 0 && (!sent || ::GetTickCount64() - sent > 3000)) {
+      sent = ::GetTickCount64();
+      // What the file picker hands the page: a Chrome export and a file of
+      // something else.
+      s->tab->browser()->GetMainFrame()->ExecuteJavaScript(
+          "(async () => {"
+          "const csv = 'name,url,username,password,note\\nCsv,https://csv-import.example/login,csvuser,csv-p4ss,\\n"
+          "App,android://x@com.app/,a,b,\\n';"
+          "const r = await orbitAction('/api/password-import-csv', {csv});"
+          "let bad = 'ok'; try { await orbitAction('/api/password-import-csv', {csv: 'title,notes\\nx,y'}); bad = 'accepted'; }"
+          " catch (e) { bad = 'refused'; }"
+          "document.title = 'CSV:' + r.imported + ':' + r.skipped + ':' + bad; })()", "", 0);
+      return false;
+    }
+    if (t.rfind(L"CSV:", 0) != 0) return false;
+    r.Check(t == L"CSV:1:1:refused", "one login imported, the app login skipped, a non-passwords file refused (" + N(t) + ")");
+    const auto stored = app->store().FindPasswords(s->window->profile()->id(), L"https://csv-import.example");
+    r.Check(stored.size() == 1 && stored[0].username == L"csvuser", "stored for its site");
+    r.Check(!stored.empty() && stored[0].secret.find(L"csv-p4ss") == std::wstring::npos &&
+                passwords::Unprotect(stored[0].secret) == L"csv-p4ss",
+            "protected, and the right password");
+    s->window->CloseTabShortcut(s->tab);
+    return true;
+  }, 15000);
   r.Add("update check answers (GitHub, informational)", [] { updater::Check(false); }, [&r] {
     const updater::Status u = updater::Current();
     if (u.state == updater::State::kChecking) return false;

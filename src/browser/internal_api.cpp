@@ -24,6 +24,7 @@
 #include "core/bookmark_html.h"
 #include "browser/importer.h"
 #include "browser/password_vault.h"
+#include "core/log.h"
 #include "core/process_metrics.h"
 #include "core/shortcuts.h"
 #include "core/space_routing.h"
@@ -651,6 +652,34 @@ InternalResponse SettingsApi(const InternalRequest& req, Profile* profile) {
     d->SetInt("bookmarks", bookmarks);
     d->SetInt("passwords", logins);
     d->SetInt("history", history);
+    return Json(d);
+  }
+  if (api == L"password-import-csv") {
+    // A passwords file the user picked (exported from a browser or password
+    // manager). Stored as imports are: DPAPI-protected, per profile.
+    if (profile->is_private()) return Error(403, "no import into private windows");
+    if (!body || !body->HasKey("csv")) return Error(400, "no file");
+    const importer::CsvLogins parsed = importer::ParsePasswordCsv(body->GetString("csv").ToString());
+    if (!parsed.recognized) return Error(400, "This file has no web address and password columns.");
+    int imported = 0;
+    {
+      Database::Transaction txn(store.db());
+      for (const auto& l : parsed.logins) {
+        const std::wstring secret = passwords::Protect(l.password);
+        if (secret.empty()) continue;
+        PasswordRecord p;
+        p.profile_id = profile->id();
+        p.origin = l.origin;
+        p.username = l.username;
+        p.secret = secret;
+        if (store.UpsertPassword(p)) ++imported;
+      }
+      txn.Commit();
+    }
+    ORBIT_LOG_INFO("imported %d passwords from a file (%d rows skipped)", imported, parsed.skipped);
+    Dict d = CefDictionaryValue::Create();
+    d->SetInt("imported", imported);
+    d->SetInt("skipped", parsed.skipped);
     return Json(d);
   }
   if (api == L"set") {

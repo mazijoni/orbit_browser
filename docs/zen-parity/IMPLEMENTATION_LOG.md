@@ -443,6 +443,18 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
      - `zen` test: an icon page, then another host in the same tab, has no icon and stores none.
   3. **Space icons in one color.** Space and folder icons are drawn from the emoji's outline in the text color (no `ENABLE_COLOR_FONT`), as Zen does. The Library's Spaces cards use the text presentation (`U+FE0E`, `font-variant-emoji: text`).
 
+- 0.1.9 (2026-10-27): **importing a passwords file** after setup.
+  - Settings → Saved passwords has "Import passwords from a file…" for a .csv exported from a browser or password manager.
+  - `importer::ParsePasswordCsv` (orbit_core):
+    - Reads RFC 4180 CSV: quotes, doubled quotes, line breaks in fields, a BOM, and `,` / `;` / tab delimiters.
+    - Finds the URL, username and password columns by name, so it covers Chrome / Edge / Brave / Opera, Firefox, Bitwarden (`type` = login only), 1Password, LastPass, Safari and KeePass.
+    - Takes http(s) logins only; a bare domain counts as https.
+  - API `password-import-csv` (POST, the Settings page's own gate): stores the logins as other imports do (DPAPI, per profile, update on the same origin + username). Refused in private windows and for files without URL and password columns.
+  - The page tells the user to delete the plain-text file afterwards.
+  - Tests:
+    - Unit tests `PasswordCsv_*` (formats, quoting, skipped rows).
+    - `zen` test: imported through the Settings page, the app login skipped, a non-passwords file refused, the stored password protected and correct.
+
 ## Next actions
 
 1. Check by hand, with a real mouse: drag a tab out of the window onto the desktop (a linked window opens at the cursor), and onto another Orbit window (the tab moves there).

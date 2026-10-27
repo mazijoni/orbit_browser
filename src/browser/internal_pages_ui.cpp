@@ -381,6 +381,12 @@ InternalResponse SettingsPage(const InternalRequest& req) {
     <div class="row" style="padding-left:0"><label class="grow" for="autofillPasswords">Fill saved passwords into sign-in forms</label><input type="checkbox" id="autofillPasswords"></div>
     <div class="toolbar" style="margin:6px 0"><input type="search" id="pwFilter" placeholder="Search passwords" style="flex:1" aria-label="Search passwords"></div>
     <div id="passwords" class="muted">No saved passwords.</div>
+    <div class="toolbar" style="margin-top:10px;gap:8px;align-items:center">
+      <button id="pwImportFile">Import passwords from a file…</button>
+      <input type="file" id="pwFile" accept=".csv,text/csv" hidden>
+      <span id="pwImportStatus" class="muted"></span>
+    </div>
+    <div class="muted" style="margin-top:4px">A .csv file exported from Chrome, Edge, Brave, Firefox, Safari, Bitwarden, 1Password, LastPass, KeePass or similar. The file holds your passwords in plain text: delete it once they are imported.</div>
   </div>
   <h2>Site permissions</h2>
   <div class="card" id="perms"></div>
@@ -571,6 +577,28 @@ async function set(key, value) {
       loadPasswords();
     } catch (e) { importStatus.textContent = 'Import failed.'; }
   });
+
+  // Saved passwords: import from a file.
+  const pwFile = document.getElementById('pwFile'), pwImportStatus = document.getElementById('pwImportStatus');
+  document.getElementById('pwImportFile').disabled = !!s.private;
+  document.getElementById('pwImportFile').onclick = () => pwFile.click();
+  pwFile.onchange = async () => {
+    const file = pwFile.files[0];
+    pwFile.value = '';
+    if (!file) return;
+    if (file.size > 15 * 1024 * 1024) { pwImportStatus.textContent = 'That file is too large.'; return; }
+    pwImportStatus.textContent = 'Importing…';
+    try {
+      const r = await orbitAction('/api/password-import-csv', {csv: await file.text()});
+      pwImportStatus.textContent = 'Imported ' + r.imported + (r.imported === 1 ? ' password' : ' passwords') +
+        (r.skipped ? ' (' + r.skipped + ' skipped: no web address or password).' : '.');
+      loadPasswords();
+    } catch (e) {
+      pwImportStatus.textContent = String(e && e.message).includes('400')
+        ? 'This file does not look like a passwords export (it needs web address and password columns).'
+        : 'Import failed.';
+    }
+  };
 
   // Saved passwords.
   const pwBox = document.getElementById('passwords'), pwFilter = document.getElementById('pwFilter');

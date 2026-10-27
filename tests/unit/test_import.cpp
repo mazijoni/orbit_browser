@@ -104,3 +104,52 @@ TEST(Store_PasswordsUpsertFindAndCascade) {
   EXPECT_TRUE(store.DeleteProfile(p->id));  // the profile's logins go with it
   EXPECT_EQ(store.PasswordCount(p->id), 0);
 }
+
+// Passwords files (CSV) exported from browsers and password managers.
+TEST(PasswordCsv_ChromeFormat) {
+  const auto r = importer::ParsePasswordCsv(
+      "name,url,username,password,note\r\n"
+      "example.com,https://example.com/login,alice,s3cret,\r\n"
+      "\"Quoted, name\",https://Shop.Example.org:8443/a?b=c,\"bob \"\"the\"\" builder\",\"p,a\"\"ss\",\"multi\nline note\"\r\n"
+      "app,android://AAAA@com.example.app/,carol,x,\r\n"
+      "empty,https://nopass.example/,dave,,\r\n");
+  EXPECT_TRUE(r.recognized);
+  EXPECT_EQ(r.logins.size(), static_cast<size_t>(2));
+  EXPECT_EQ(r.skipped, 2);
+  if (r.logins.size() == 2) {
+    EXPECT_EQ(r.logins[0].origin, std::wstring(L"https://example.com"));
+    EXPECT_EQ(r.logins[0].username, std::wstring(L"alice"));
+    EXPECT_EQ(r.logins[0].password, std::wstring(L"s3cret"));
+    EXPECT_EQ(r.logins[1].origin, std::wstring(L"https://shop.example.org:8443"));
+    EXPECT_EQ(r.logins[1].username, std::wstring(L"bob \"the\" builder"));
+    EXPECT_EQ(r.logins[1].password, std::wstring(L"p,a\"ss"));
+  }
+}
+
+TEST(PasswordCsv_FirefoxBitwardenAndOthers) {
+  const auto firefox = importer::ParsePasswordCsv(
+      "\xEF\xBB\xBF\"url\",\"username\",\"password\",\"httpRealm\",\"formActionOrigin\",\"guid\",\"timeCreated\"\n"
+      "\"https://www.mozilla.org\",\"fox\",\"r3d\",,\"https://www.mozilla.org\",\"{x}\",\"1\"\n");
+  EXPECT_TRUE(firefox.recognized && firefox.logins.size() == 1);
+  if (!firefox.logins.empty()) EXPECT_EQ(firefox.logins[0].username, std::wstring(L"fox"));
+
+  const auto bitwarden = importer::ParsePasswordCsv(
+      "folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n"
+      ",,login,Site,,,0,https://bw.example.com/,warden,b1t,\n"
+      ",,note,A note,secret text,,0,,,,\n");
+  EXPECT_TRUE(bitwarden.recognized && bitwarden.logins.size() == 1 && bitwarden.skipped == 1);
+  if (!bitwarden.logins.empty()) EXPECT_EQ(bitwarden.logins[0].password, std::wstring(L"b1t"));
+
+  // KeePass-style: other column names, a bare domain, semicolons.
+  const auto keepass = importer::ParsePasswordCsv(
+      "\"Account\";\"Login Name\";\"Password\";\"Web Site\";\"Comments\"\n"
+      "\"Mail\";\"kee\";\"p4ss\";\"mail.example.net\";\"\"\n");
+  EXPECT_TRUE(keepass.recognized && keepass.logins.size() == 1);
+  if (!keepass.logins.empty()) {
+    EXPECT_EQ(keepass.logins[0].origin, std::wstring(L"https://mail.example.net"));
+    EXPECT_EQ(keepass.logins[0].username, std::wstring(L"kee"));
+  }
+
+  EXPECT_FALSE(importer::ParsePasswordCsv("title,notes\nx,y\n").recognized);
+  EXPECT_FALSE(importer::ParsePasswordCsv("").recognized);
+}

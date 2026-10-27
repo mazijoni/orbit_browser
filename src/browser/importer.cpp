@@ -541,4 +541,140 @@ Data Read(const Source& source, bool want_bookmarks, bool want_logins, bool want
   return data;
 }
 
+namespace {
+
+// RFC 4180 records: quoted fields may hold the delimiter, quotes ("") and
+// line breaks.
+std::vector<std::vector<std::string>> CsvRecords(std::string_view text, char delimiter, size_t max_rows) {
+  std::vector<std::vector<std::string>> rows;
+  std::vector<std::string> row;
+  std::string field;
+  bool quoted = false, any = false;
+  for (size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    if (quoted) {
+      if (c == '"') {
+        if (i + 1 < text.size() && text[i + 1] == '"') {
+          field += '"';
+          ++i;
+        } else {
+          quoted = false;
+        }
+      } else if (field.size() < 64 * 1024) {
+        field += c;
+      }
+      continue;
+    }
+    if (c == '"' && field.empty()) {
+      quoted = true;
+      any = true;
+    } else if (c == delimiter) {
+      row.push_back(std::move(field));
+      field.clear();
+      any = true;
+    } else if (c == '\r' || c == '\n') {
+      if (c == '\r' && i + 1 < text.size() && text[i + 1] == '\n') ++i;
+      if (any || !field.empty()) {
+        row.push_back(std::move(field));
+        rows.push_back(std::move(row));
+        if (rows.size() >= max_rows) return rows;
+      }
+      row.clear();
+      field.clear();
+      any = false;
+    } else if (field.size() < 64 * 1024) {
+      field += c;
+      any = true;
+    }
+  }
+  if (any || !field.empty()) {
+    row.push_back(std::move(field));
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+std::string Trim(std::string s) {
+  const size_t a = s.find_first_not_of(" \t");
+  const size_t b = s.find_last_not_of(" \t");
+  return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+}
+
+std::string LowerAscii(std::string s) {
+  for (char& c : s) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  return s;
+}
+
+int ColumnOf(const std::vector<std::string>& header, std::initializer_list<const char*> names) {
+  for (const char* name : names) {
+    for (size_t i = 0; i < header.size(); ++i) {
+      if (header[i] == name) return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+}  // namespace
+
+CsvLogins ParsePasswordCsv(std::string_view text) {
+  CsvLogins out;
+  if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+      static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF) {
+    text.remove_prefix(3);
+  }
+  // The delimiter: whichever of , ; tab the header line has most of.
+  const std::string_view first = text.substr(0, text.find_first_of("\r\n"));
+  char delimiter = ',';
+  size_t best = static_cast<size_t>(std::count(first.begin(), first.end(), ','));
+  for (const char d : {';', '\t'}) {
+    const size_t n = static_cast<size_t>(std::count(first.begin(), first.end(), d));
+    if (n > best) {
+      best = n;
+      delimiter = d;
+    }
+  }
+  auto rows = CsvRecords(text, delimiter, 200000);
+  if (rows.empty()) return out;
+  std::vector<std::string> header;
+  for (const std::string& h : rows[0]) header.push_back(LowerAscii(Trim(h)));
+  const int url = ColumnOf(header, {"url", "login_uri", "login url", "website", "web site", "web site url", "origin",
+                                    "hostname", "uri", "address"});
+  const int user = ColumnOf(header, {"username", "login_username", "login name", "user name", "user", "login",
+                                     "email", "e-mail", "email address"});
+  const int pass = ColumnOf(header, {"password", "login_password", "pass"});
+  const int type = ColumnOf(header, {"type"});  // Bitwarden: logins only
+  if (url < 0 || pass < 0) return out;
+  out.recognized = true;
+  for (size_t r = 1; r < rows.size(); ++r) {
+    const auto& row = rows[r];
+    auto at = [&row](int i) { return i >= 0 && static_cast<size_t>(i) < row.size() ? Trim(row[i]) : std::string(); };
+    if (type >= 0 && !at(type).empty() && LowerAscii(at(type)) != "login") {
+      ++out.skipped;
+      continue;
+    }
+    std::wstring address = FromUtf8(at(url));
+    const std::string password = row.size() > static_cast<size_t>(pass) ? row[static_cast<size_t>(pass)] : "";
+    if (!address.empty() && address.find(L"://") == std::wstring::npos && address.find(L'.') != std::wstring::npos &&
+        address.find_first_of(L" @") == std::wstring::npos) {
+      address = L"https://" + address;  // a bare domain (KeePass, LastPass)
+    }
+    if (password.empty() || password.size() > 4096 ||
+        !(StartsWithNoCase(address, L"https://") || StartsWithNoCase(address, L"http://"))) {
+      ++out.skipped;
+      continue;
+    }
+    std::wstring origin = OriginString(address);
+    const size_t host = origin.find(L"://") + 3;
+    if (origin.size() <= host) {
+      ++out.skipped;
+      continue;
+    }
+    origin = ToLowerAscii(origin);  // scheme and host are case-insensitive
+    out.logins.push_back({origin, FromUtf8(at(user)), FromUtf8(password)});
+  }
+  return out;
+}
+
 }  // namespace orbit::importer

@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/bookmark_html.h"
@@ -55,6 +56,19 @@ std::vector<Source> DetectSources();
 // the source browser does not have to be closed. Missing or unreadable parts
 // are skipped; the returned Data has whatever could be read.
 Data Read(const Source& source, bool want_bookmarks, bool want_logins, bool want_history);
+
+// A passwords file exported from a browser or password manager (CSV):
+// Chrome / Edge / Brave / Opera ("name,url,username,password,note"), Firefox
+// ("url","username","password",...), Bitwarden (login_uri, login_username,
+// login_password), 1Password, LastPass, Safari, KeePass and the like; the
+// columns are found by their names. Only web logins (http / https; a bare
+// "example.com" counts as https) with a password are taken.
+struct CsvLogins {
+  bool recognized = false;  // a header with a URL and a password column
+  std::vector<Login> logins;
+  int skipped = 0;          // rows without a web address or a password
+};
+CsvLogins ParsePasswordCsv(std::string_view text);
 
 // Exposed for tests: decrypt a Chromium "encrypted_value" column given the
 // AES key already unwrapped from Local State (empty for the legacy DPAPI
