@@ -62,6 +62,8 @@ class Toast {
   void Render();
   void Tick();
   void ScheduleHide();
+  // The pointer is over the toast's body (not its shadow) right now.
+  bool PointerOverBody() const;
   float Dpi() const;
 
   HWND owner_;
@@ -71,7 +73,8 @@ class Toast {
   Phase phase_ = Phase::kHidden;
   ULONGLONG phase_start_ = 0;
   float start_scale_ = 0.f;
-  bool hovered_ = false;
+  bool hovered_ = false;  // kept up while the pointer rests on it
+  POINT shown_at_pointer_{};  // where the pointer was when it appeared
   // Measured toast body in DIPs (without the shadow margin).
   float body_w_ = 0.f;
   float text_w_ = 0.f;

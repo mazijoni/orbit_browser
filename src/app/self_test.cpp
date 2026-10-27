@@ -1295,6 +1295,25 @@ void AddZenSuite(Runner& r) {
 
   r.Add("the copy toast hides after its 3 s timeout", nullptr,
         [s] { return s->window->visible_toast_id().empty(); }, 6000);
+  r.Add("a copy toast that was hovered still goes once the pointer is elsewhere", [s] {
+    s->window->HandleAccelerator('C', true, true, false);
+  }, [s] {
+    static ULONGLONG shown = 0;
+    if (!shown) {
+      if (s->window->visible_toast_id() != L"copy-url") return false;
+      shown = ::GetTickCount64();
+      return false;
+    }
+    static bool hovered = false;
+    if (!hovered && ::GetTickCount64() - shown > 700) {
+      // The toast thinks the pointer came over it (the real one is not there).
+      hovered = true;
+      ::SendMessageW(s->window->toast_hwnd(), WM_MOUSEMOVE, 0, MAKELPARAM(60, 40));
+      // Copied again while "hovered": the message is replaced under it.
+      s->window->HandleAccelerator('C', true, true, false);
+    }
+    return hovered && s->window->visible_toast_id().empty();
+  }, 9000);
 
   r.Add("set up: one pinned tab and three unpinned tabs", [s] {
     Workspace* ws = s->window->workspace();

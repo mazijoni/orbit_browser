@@ -455,6 +455,18 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
     - Unit tests `PasswordCsv_*` (formats, quoting, skipped rows).
     - `zen` test: imported through the Settings page, the app login skipped, a non-passwords file refused, the stored password protected and correct.
 
+- 0.2.0 (2026-10-27, was going to be 0.1.10): **the "Copied current URL" toast stayed up.**
+  - Not reproduced. Toasts stay up while hovered, and three paths could keep one up for good:
+    - It appears at the window's top right, which can be right over the copy-URL button of a top-right address bar. Windows then reports the pointer as over it although the user never moved there.
+    - A missed `WM_MOUSELEAVE`.
+    - A hover flag left over from a toast hidden or replaced under the pointer.
+  - Fixes in `ui/toast.cpp`:
+    - Hover counts only once the pointer has moved since the toast appeared.
+    - "Hovered" is checked against the real pointer position (`PointerOverBody`), and every 400 ms while it lasts.
+    - The flag is cleared on hide and on a new message.
+  - `zen` test: a hovered-then-replaced copy toast still goes.
+  - A test that put the toast under the real pointer was dropped: the user's pointer moves during test runs.
+
 ## Next actions
 
 1. Check by hand, with a real mouse: drag a tab out of the window onto the desktop (a linked window opens at the cursor), and onto another Orbit window (the tab moves there).

@@ -19,6 +19,8 @@ using Microsoft::WRL::ComPtr;
 constexpr wchar_t kToastClass[] = L"OrbitToast";
 constexpr UINT_PTR kAnimationTimer = 1;
 constexpr UINT_PTR kHideTimer = 2;
+constexpr UINT_PTR kHoverTimer = 3;  // while hovered: has the pointer left?
+constexpr UINT kHoverCheckMs = 400;
 constexpr UINT kFrameMs = 15;
 constexpr float kShowMs = 500.f;   // spring, bounce 0.2
 constexpr float kHideMs = 200.f;   // opacity 1 -> 0, scale 1 -> 0.5
@@ -117,6 +119,9 @@ void Toast::Show(const Content& content, const Style& style) {
   content_ = content;
   style_ = style;
   ::KillTimer(hwnd_, kHideTimer);
+  ::KillTimer(hwnd_, kHoverTimer);
+  hovered_ = false;  // a new message: the pointer must rest on it again
+  ::GetCursorPos(&shown_at_pointer_);
   Measure();
   start_scale_ = reused ? 0.2f : 0.f;
   phase_ = Phase::kShowing;
@@ -138,14 +143,34 @@ void Toast::Hide() {
   if (!hwnd_) return;
   ::KillTimer(hwnd_, kAnimationTimer);
   ::KillTimer(hwnd_, kHideTimer);
+  ::KillTimer(hwnd_, kHoverTimer);
+  hovered_ = false;
   phase_ = Phase::kHidden;
   ::ShowWindow(hwnd_, SW_HIDE);
 }
 
 void Toast::ScheduleHide() {
-  if (phase_ == Phase::kShown && !hovered_) {
+  if (phase_ != Phase::kShown) return;
+  // Hovered only while the pointer is really there: Windows does not always
+  // report leaving (the toast replaced or hidden under it), and a stale flag
+  // kept every later toast up for good.
+  if (hovered_ && !PointerOverBody()) hovered_ = false;
+  if (hovered_) {
+    ::SetTimer(hwnd_, kHoverTimer, kHoverCheckMs, nullptr);
+  } else {
     ::SetTimer(hwnd_, kHideTimer, static_cast<UINT>(content_.timeout_ms), nullptr);
   }
+}
+
+bool Toast::PointerOverBody() const {
+  if (!hwnd_ || !::IsWindowVisible(hwnd_)) return false;
+  POINT pt;
+  ::GetCursorPos(&pt);
+  RECT r;
+  ::GetWindowRect(hwnd_, &r);
+  const int margin = static_cast<int>(std::lround(kMargin * Dpi() / 96.f));
+  ::InflateRect(&r, -margin, -margin);
+  return ::PtInRect(&r, pt) != FALSE;
 }
 
 void Toast::Measure() {
@@ -337,6 +362,12 @@ LRESULT Toast::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
       if (wp == kAnimationTimer) {
         Tick();
+      } else if (wp == kHoverTimer) {
+        if (!PointerOverBody()) {
+          ::KillTimer(hwnd_, kHoverTimer);
+          hovered_ = false;
+          ScheduleHide();
+        }
       } else if (wp == kHideTimer) {
         ::KillTimer(hwnd_, kHideTimer);
         phase_ = Phase::kHiding;
@@ -344,7 +375,7 @@ LRESULT Toast::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         ::SetTimer(hwnd_, kAnimationTimer, kFrameMs, nullptr);
       }
       return 0;
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
       if (button_.right > button_.left) {
         const float scale = Dpi() / 96.f;
         const float x = static_cast<float>(static_cast<short>(LOWORD(lp))) / scale;
@@ -355,16 +386,24 @@ LRESULT Toast::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
           Render();
         }
       }
-      // Hovering keeps the toast up (mouseover clears the hide timer).
-      if (!hovered_) {
+      // Hovering keeps the toast up (mouseover clears the hide timer). Not
+      // when it appeared under a pointer that has not moved since (it shows
+      // over the copy-URL button of a top-right address bar): that kept it
+      // up until the user happened to move away.
+      POINT now;
+      ::GetCursorPos(&now);
+      if (!hovered_ && (now.x != shown_at_pointer_.x || now.y != shown_at_pointer_.y)) {
         hovered_ = true;
         TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd_, 0};
         ::TrackMouseEvent(&tme);
         ::KillTimer(hwnd_, kHideTimer);
+        if (phase_ == Phase::kShown) ::SetTimer(hwnd_, kHoverTimer, kHoverCheckMs, nullptr);
       }
       return 0;
+    }
     case WM_MOUSELEAVE:
       hovered_ = false;
+      ::KillTimer(hwnd_, kHoverTimer);
       if (button_hot_) {
         button_hot_ = false;
         Render();
