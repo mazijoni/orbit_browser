@@ -71,7 +71,9 @@ Orbit's Settings → Updates, and a daily background check, read the newest GitH
 To ship a version:
 
 1. Raise `project(orbit VERSION x.y.z)` in `CMakeLists.txt` and commit.
-2. Run `git tag vx.y.z`, then `git push origin main --tags`.
+2. Run `git tag vx.y.z` after that commit, then `git push origin main --tags`.
+
+The workflow fails before building if the tag and the version in `CMakeLists.txt` differ, so a tag on the wrong commit cannot publish an old build under a new version. To fix such a tag, move it (`git tag -f vx.y.z`, then `git push --force origin vx.y.z`).
 
 The workflow attaches `Orbit Browser Setup.exe` to the release. GitHub renames it `Orbit.Browser.Setup.exe`; the updater looks for an `.exe` asset with "Setup" in its name.
 

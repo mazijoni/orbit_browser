@@ -16,6 +16,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A tag on the wrong commit would publish an old build under a new version,
+      # and installed copies would offer the same "update" forever.
+      - name: Check the tag matches the version (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(orbit VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          if ('${{ github.ref_name }}' -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} is on a commit whose CMakeLists.txt says $version."
+          }
+
       - name: Cache dependencies (CEF, SQLite)
         uses: actions/cache@v4
         with:
