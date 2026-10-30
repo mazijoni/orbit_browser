@@ -126,6 +126,21 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
   if (path == "/page") {
     body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) +
            "</title><body>test page</body>";
+  } else if (path == "/dark") {
+    // Paints dark at once: white on screen comes from the browser, not the page.
+    // only=html / only=body: the colour on that element alone. late=1: set by
+    // script after the page has loaded.
+    const std::string only = QueryParam(target, "only");
+    const std::string rule = only == "html"   ? "html{background:#101014}"
+                             : only == "body" ? "body{background:#101014}"
+                                              : "html,body{background:#101014}";
+    body = "<!doctype html><title>" + EscapeHtml(QueryParam(target, "t")) + "</title><style>html,body{margin:0;height:100%;color:#888}" +
+           (QueryParam(target, "late") == "1" ? std::string() : rule) + "</style><body>dark page" +
+           (QueryParam(target, "late") == "1"
+                ? "<script>addEventListener('load', () => setTimeout(() => { const s = document.createElement('style');"
+                  "s.textContent = 'body{background:#101014}'; document.head.append(s); }, 300));</script>"
+                : "") +
+           "</body>";
   } else if (path == "/media") {
     // Plays the test tone with MediaSession metadata (the media card's source).
     body = "<!doctype html><title>media</title><audio id=a src=\"/tone.wav\" loop></audio><script>"

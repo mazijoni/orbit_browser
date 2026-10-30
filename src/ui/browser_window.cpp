@@ -2682,6 +2682,7 @@ void BrowserWindow::OpenLibrary() {
     info.SetAsChild(library_host_, CefRect(0, 0, rc.right, rc.bottom));
     info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
     CefBrowserSettings settings;
+    settings.background_color = ui::ToArgb(backdrop_.from);
     library_client_ = new LibraryClient(this, LibraryClient::kLibrary);
     library_creating_ = CefBrowserHost::CreateBrowser(info, library_client_, url, settings, nullptr,
                                                       profile_->request_context());
@@ -2887,6 +2888,7 @@ void BrowserWindow::OpenSiteData() {
     info.SetAsChild(site_popup_, CefRect(0, 0, rc.right, rc.bottom));
     info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
     CefBrowserSettings settings;
+    settings.background_color = ui::ToArgb(palette_.content_bg);
     site_client_ = new LibraryClient(this, LibraryClient::kSiteData);
     site_creating_ = CefBrowserHost::CreateBrowser(info, site_client_, "orbit://sitedata/", settings,
                                                    nullptr, profile_->request_context());
@@ -2924,6 +2926,7 @@ void BrowserWindow::OpenThemePicker(Workspace* ws) {
     info.SetAsChild(theme_popup_, CefRect(0, 0, rc.right, rc.bottom));
     info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
     CefBrowserSettings settings;
+    settings.background_color = ui::ToArgb(palette_.content_bg);
     theme_client_ = new LibraryClient(this, LibraryClient::kTheme);
     theme_creating_ = CefBrowserHost::CreateBrowser(info, theme_client_, "orbit://theme/", settings, nullptr,
                                                     profile_->request_context());
@@ -2962,6 +2965,7 @@ void BrowserWindow::OpenBoostEditor() {
     info.SetAsChild(boost_popup_, CefRect(0, 0, rc.right, rc.bottom));
     info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
     CefBrowserSettings settings;
+    settings.background_color = ui::ToArgb(palette_.content_bg);
     boost_client_ = new LibraryClient(this, LibraryClient::kBoost);
     boost_creating_ = CefBrowserHost::CreateBrowser(info, boost_client_, "orbit://boost/", settings, nullptr,
                                                     profile_->request_context());

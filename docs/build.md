@@ -39,7 +39,7 @@ Useful switches:
 
 * `--user-data-dir=<dir>`: the profile root. Default: `%LOCALAPPDATA%\Orbit\User Data`.
 * `--orbit-verbose-log`: verbose application log (`<user-data>\orbit.log`). Chromium's own log is `chromium.log`.
-* `--orbit-self-test=<suite>`: run an integration suite. This requires `--user-data-dir` and never touches a real profile.
+* `--orbit-self-test=<suite>`: run an integration suite. This requires `--user-data-dir` and never touches a real profile. The `flash` suite is not in `run_selftests.ps1`: it reads the real screen for white frames while panels open, so it keeps its window topmost, and it needs the window unobstructed.
 
 ## Notes and pitfalls
 

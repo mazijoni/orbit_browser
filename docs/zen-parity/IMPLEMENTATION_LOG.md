@@ -466,6 +466,14 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
     - The flag is cleared on hide and on a new message.
   - `zen` test: a hovered-then-replaced copy toast still goes.
   - A test that put the toast under the real pointer was dropped: the user's pointer moves during test runs.
+- White flashes when panels open or a page resizes (glance, library, compact mode):
+  - Cause: Chromium shows its browser scheme's background wherever a page has not drawn yet. The scheme was forced light.
+  - `background_color` does not reach that area on Chrome-style tabs, so the scheme now follows Orbit's theme.
+  - Under a dark scheme a page with no background was black text on `#1F1F1F`, and `Emulation.setDefaultBackgroundColorOverride` is accepted but has no effect. `kPlainPageWhite` gives such pages a white canvas with a zero-specificity rule.
+  - Alloy panels (library, site data, theme picker, boosts, find) set `background_color`: they are separate browsers with their own first paint.
+  - Limit: a dark page in a light theme still shows a light strip while resizing.
+  - Self-test `flash`: 0.0% white in every action (before: up to 10.8% on glance open), and page colours for no background, `html` only, `body` only and a late `body` colour.
+  - The `zen` theme picker test now finds its own window's popup: `FindWindow` could return another window's hidden one.
 
 ## Next actions
 

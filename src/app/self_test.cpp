@@ -6,12 +6,14 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cwctype>
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "app/application.h"
@@ -3097,7 +3099,11 @@ void AddZenSuite(Runner& r) {
   r.Add("theme picker: closing stores the theme", [s, stored_theme, &r] {
     r.Check(s->window->library_alive(), "the picker's browser counts for the window's close");
     // As Alt+F4 on the panel would: it closes the picker, the popup survives.
-    HWND popup = ::FindWindowW(L"OrbitSiteData", L"Edit Theme");
+    // This window's: another window can hold a hidden picker of its own.
+    HWND popup = nullptr;
+    do {
+      popup = ::FindWindowExW(nullptr, popup, L"OrbitSiteData", L"Edit Theme");
+    } while (popup && ::GetWindow(popup, GW_OWNER) != s->window->hwnd());
     r.Check(popup != nullptr, "the picker popup exists");
     if (popup) ::SendMessageW(popup, WM_CLOSE, 0, 0);
     r.Check(!s->window->theme_picker_open() && popup && ::IsWindow(popup), "WM_CLOSE hides it without destroying it");
@@ -4235,6 +4241,193 @@ void AddStoreInstallSuite(Runner& r) {
     return ::GetTickCount64() - s->t0 > 40000;
   }, 50000);
 }
+
+// White on screen while panels open and close (Chromium's default background
+// showing before a page's first frame). The test pages are dark and so is the
+// theme: white in a frame comes from the browser. Run on its own, not in the
+// default list: it reads the real screen, so the window is kept topmost.
+class WhiteSampler {
+ public:
+  void Start(HWND window) {
+    window_ = window;
+    stop_ = false;
+    worker_ = std::thread([this] { Run(); });
+  }
+  void Stop() {
+    stop_ = true;
+    if (worker_.joinable()) worker_.join();
+  }
+  double peak_percent() const { return peak_percent_; }
+  int white_ms() const { return white_ms_; }
+  int frames() const { return frames_; }
+  void SavePeak(const std::filesystem::path& path) const {
+    if (peak_.empty()) return;
+    BITMAPINFOHEADER info = Header(peak_w_, peak_h_);
+    BITMAPFILEHEADER file{};
+    file.bfType = 0x4D42;
+    file.bfOffBits = sizeof(file) + sizeof(info);
+    file.bfSize = file.bfOffBits + static_cast<DWORD>(peak_.size() * 4);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) return;
+    std::fwrite(&file, sizeof(file), 1, f);
+    std::fwrite(&info, sizeof(info), 1, f);
+    std::fwrite(peak_.data(), 4, peak_.size(), f);
+    std::fclose(f);
+  }
+
+ private:
+  static BITMAPINFOHEADER Header(int w, int h) {
+    BITMAPINFOHEADER info{sizeof(info)};
+    info.biWidth = w;
+    info.biHeight = -h;
+    info.biPlanes = 1;
+    info.biBitCount = 32;
+    info.biCompression = BI_RGB;
+    return info;
+  }
+  void Run() {
+    RECT rc;
+    ::GetWindowRect(window_, &rc);
+    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    HDC screen = ::GetDC(nullptr);
+    HDC dc = ::CreateCompatibleDC(screen);
+    BITMAPINFO bmi{};
+    bmi.bmiHeader = Header(w, h);
+    void* bits = nullptr;
+    HBITMAP dib = ::CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ old = ::SelectObject(dc, dib);
+    const size_t count = static_cast<size_t>(w) * h;
+    ULONGLONG last = ::GetTickCount64();
+    while (!stop_) {
+      ::BitBlt(dc, 0, 0, w, h, screen, rc.left, rc.top, SRCCOPY);
+      ::GdiFlush();
+      const auto* px = static_cast<const uint32_t*>(bits);
+      size_t white = 0;
+      for (size_t i = 0; i < count; ++i) {
+        const uint32_t v = px[i];
+        if ((v & 0xFF) >= 240 && ((v >> 8) & 0xFF) >= 240 && ((v >> 16) & 0xFF) >= 240) ++white;
+      }
+      const double percent = 100.0 * static_cast<double>(white) / static_cast<double>(count);
+      const ULONGLONG now = ::GetTickCount64();
+      if (percent >= 5.0) white_ms_ += static_cast<int>(now - last);
+      last = now;
+      ++frames_;
+      if (percent > peak_percent_) {
+        peak_percent_ = percent;
+        peak_.assign(px, px + count);
+        peak_w_ = w;
+        peak_h_ = h;
+      }
+    }
+    ::SelectObject(dc, old);
+    ::DeleteObject(dib);
+    ::DeleteDC(dc);
+    ::ReleaseDC(nullptr, screen);
+  }
+
+  HWND window_ = nullptr;
+  std::atomic<bool> stop_{false};
+  std::thread worker_;
+  double peak_percent_ = 0;
+  int white_ms_ = 0;
+  int frames_ = 0;
+  std::vector<uint32_t> peak_;
+  int peak_w_ = 0, peak_h_ = 0;
+};
+
+void AddFlashSuite(Runner& r) {
+  Application* app = Application::Get();
+  struct State {
+    BrowserWindow* window = nullptr;
+    Tab* page = nullptr;
+    Tab* other = nullptr;
+    std::unique_ptr<WhiteSampler> sampler;
+    ULONGLONG t0 = 0;
+  };
+  auto s = std::make_shared<State>();
+  g_server = std::make_shared<TestHttpServer>();
+  g_server->Start();
+
+  // One action, sampled for |ms| from just before it starts.
+  auto measure = [&r, s, app](const std::string& name, std::function<void()> action, int ms = 1500) {
+    r.Add("settle before " + name, [s] { s->t0 = ::GetTickCount64(); },
+          [s] { return ::GetTickCount64() - s->t0 > 1000; });
+    r.Add(name, [s, action] {
+      s->sampler = std::make_unique<WhiteSampler>();
+      s->sampler->Start(s->window->hwnd());
+      ::Sleep(30);
+      s->t0 = ::GetTickCount64();
+      action();
+    }, [s, app, name, ms, &r] {
+      if (::GetTickCount64() - s->t0 < static_cast<ULONGLONG>(ms)) return false;
+      s->sampler->Stop();
+      s->sampler->SavePeak(app->user_data_dir() / (L"flash-" + FromUtf8(name) + L".bmp"));
+      char line[160];
+      std::snprintf(line, sizeof(line), "%s: peak %.1f%% white, %d ms at 5%%+, %d frames", name.c_str(),
+                    s->sampler->peak_percent(), s->sampler->white_ms(), s->sampler->frames());
+      r.Check(s->sampler->peak_percent() < 5.0, line);
+      return true;
+    }, ms + 5000);
+  };
+
+  r.Add("a dark window on a dark page", [s, app] {
+    s->window = FirstWindowOf(app->profiles().front().get());
+    app->store().SetPref(Store::kGlobalScope, L"theme", L"dark");
+    app->ApplyThemeToAllWindows();
+    ::SetWindowPos(s->window->hwnd(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    ::SetForegroundWindow(s->window->hwnd());
+    s->page = s->window->OpenTab(g_server->Url(L"/dark?t=Page"), true);
+  }, [s] { return s->page && s->page->browser() && !s->page->loading(); });
+  measure("new-tab", [s] { s->other = s->window->OpenTab(g_server->Url(L"/dark?t=Other"), true); });
+  measure("tab-switch", [s] { s->window->ActivateTab(s->page); });
+  measure("glance-open", [s] {
+    BrowserWindow::GlanceOrigin origin{};
+    origin.x = 200;
+    origin.y = 200;
+    origin.width = 100;
+    origin.height = 30;
+    origin.zoom = 1.0;
+    s->window->OpenGlance(s->page, g_server->Url(L"/dark?t=Glance"), origin);
+  });
+  measure("glance-close", [s] { s->window->CloseGlanceAnimated(); });
+  measure("library-open", [s] { s->window->OpenLibrary(); });
+  measure("library-close", [s] { s->window->CloseLibrary(); });
+  measure("library-reopen", [s] { s->window->OpenLibrary(); });
+  measure("library-reclose", [s] { s->window->CloseLibrary(); });
+  measure("compact-on", [s] { s->window->SetCompactMode(true); });
+  measure("compact-off", [s] { s->window->SetCompactMode(false); });
+  // Pages keep their own colours under the dark scheme: white when they paint
+  // nothing, and whatever they asked for, however they asked for it.
+  auto page_colour = [&r, s](const std::string& name, const std::wstring& path, bool white, int wait_ms = 2000) {
+    r.Add(name, [s, path] {
+      s->other = s->window->OpenTab(g_server->Url(path), true);
+      s->t0 = ::GetTickCount64();
+    }, [s, name, white, wait_ms, &r] {
+      if (::GetTickCount64() - s->t0 < static_cast<ULONGLONG>(wait_ms)) return false;
+      const RECT c = s->window->ContentRectPx();
+      POINT at{(c.left + c.right) / 2, (c.top + c.bottom) / 2};
+      ::ClientToScreen(s->window->hwnd(), &at);
+      HDC screen = ::GetDC(nullptr);
+      const COLORREF px = ::GetPixel(screen, at.x, at.y);
+      ::ReleaseDC(nullptr, screen);
+      const bool is_white = GetRValue(px) >= 240 && GetGValue(px) >= 240 && GetBValue(px) >= 240;
+      r.Check(is_white == white && (white || GetRValue(px) == 0x10),
+              name + " (r=" + std::to_string(GetRValue(px)) + ")");
+      return true;
+    }, wait_ms + 5000);
+  };
+  page_colour("no background is white", L"/page?t=Plain", true);
+  page_colour("a colour on html alone stays", L"/dark?t=H&only=html", false);
+  page_colour("a colour on body alone reaches the canvas", L"/dark?t=B&only=body", false);
+  // The white rule is on after loading, then has to come off again.
+  page_colour("a body colour set after loading reaches the canvas", L"/dark?t=L&late=1", false, 2500);
+  measure("library-over-a-dark-page", [s] { s->window->OpenLibrary(); });
+  r.Add("close the panel", [s] { s->window->CloseLibrary(); s->t0 = ::GetTickCount64(); },
+        [s] { return ::GetTickCount64() - s->t0 > 800; });
+  measure("site-data-panel", [s] { s->window->OpenSiteData(); });
+  r.Add("close it", [s] { s->window->CloseSiteData(); s->t0 = ::GetTickCount64(); },
+        [s] { return ::GetTickCount64() - s->t0 > 300; });
+}
 }  // namespace
 
 bool IsActive() { return g_active; }
@@ -4264,6 +4457,8 @@ void Start(const std::wstring& suite) {
     AddExtensionsSuite(*g_runner);
   } else if (suite == L"store-install") {
     AddStoreInstallSuite(*g_runner);
+  } else if (suite == L"flash") {
+    AddFlashSuite(*g_runner);
   } else if (suite == L"turnstile") {
     AddTurnstileSuite(*g_runner);
   } else {

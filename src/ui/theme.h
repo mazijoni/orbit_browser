@@ -114,6 +114,8 @@ struct Palette {
 Palette MakePalette(bool dark, uint32_t accent_rgb);
 bool SystemPrefersDark();
 COLORREF ToColorRef(const D2D1_COLOR_F& c);
+// Opaque 0xAARRGGBB (a browser's background before its first frame).
+uint32_t ToArgb(const D2D1_COLOR_F& c);
 D2D1_COLOR_F ColorFromRgb(uint32_t rgb, float alpha = 1.f);
 // Linear blend: |t| = 1 gives |a|, 0 gives |b| (Zen's blendColors).
 D2D1_COLOR_F Mix(const D2D1_COLOR_F& a, const D2D1_COLOR_F& b, float t);

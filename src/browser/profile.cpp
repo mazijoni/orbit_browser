@@ -594,11 +594,13 @@ CefRefPtr<CefRequestContext> Profile::request_context() {
       ORBIT_LOG_ERROR("profile %lld: Chromium rejected its storage path; data will NOT persist",
                        record_.id);
     }
-    // Chrome style gives a page that paints no background (plain text, JSON,
-    // raw HTML) the dark browser theme's base colour: black text on dark.
-    // Chrome shows white, so the base stays light; what pages are told to
-    // prefer comes from Orbit's theme (Tab::ApplyWebColorScheme).
-    context_->SetChromeColorScheme(CEF_COLOR_VARIANT_LIGHT, 0);
+    // Follows Orbit's theme: Chromium shows this scheme's background wherever a
+    // page has not drawn yet (a new page, a page just resized), so a light one
+    // flashes white in a dark window. A page that paints no background gets
+    // this colour too; kPlainPageWhite (orbit_app.cpp) keeps it white, as in
+    // Chrome. What pages are told to prefer comes from Tab::ApplyWebColorScheme.
+    context_->SetChromeColorScheme(
+        Application::Get()->dark_mode() ? CEF_COLOR_VARIANT_DARK : CEF_COLOR_VARIANT_LIGHT, 0);
     RegisterInternalSchemeHandler(context_, record_.id, is_private_);
     ORBIT_LOG_INFO("created request context for profile %lld (private=%d)", record_.id,
                     is_private_ ? 1 : 0);

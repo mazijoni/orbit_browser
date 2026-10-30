@@ -688,6 +688,7 @@ void Application::ApplyThemeToAllWindows() {
   // Pages follow the theme too (prefers-color-scheme).
   for (const auto* list : {&profiles_, &private_profiles_}) {
     for (const auto& p : *list) {
+      p->request_context()->SetChromeColorScheme(dark_mode() ? CEF_COLOR_VARIANT_DARK : CEF_COLOR_VARIANT_LIGHT, 0);
       for (Workspace* ws : p->containers()) {
         for (const auto& t : ws->tabs()) t->ApplyWebColorScheme();
       }

@@ -56,6 +56,11 @@ COLORREF ToColorRef(const D2D1_COLOR_F& c) {
   return RGB(ch(c.r), ch(c.g), ch(c.b));
 }
 
+uint32_t ToArgb(const D2D1_COLOR_F& c) {
+  auto byte = [](float v) { return static_cast<uint32_t>(std::lround(std::clamp(v, 0.f, 1.f) * 255.f)); };
+  return 0xFF000000u | (byte(c.r) << 16) | (byte(c.g) << 8) | byte(c.b);
+}
+
 D2D1_COLOR_F Mix(const D2D1_COLOR_F& a, const D2D1_COLOR_F& b, float t) {
   return D2D1::ColorF(a.r * t + b.r * (1.f - t), a.g * t + b.g * (1.f - t),
                       a.b * t + b.b * (1.f - t), a.a * t + b.a * (1.f - t));

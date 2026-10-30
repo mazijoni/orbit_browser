@@ -162,6 +162,7 @@ void FindBar::Open(BrowserWindow* window) {
   info.SetAsChild(bar->popup_, CefRect(0, 0, rc.right, rc.bottom));
   info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
   CefBrowserSettings settings;
+  settings.background_color = ui::ToArgb(window->palette().content_bg);
   if (!CefBrowserHost::CreateBrowser(info, bar, "orbit://find/", settings, nullptr,
                                      window->profile()->request_context())) {
     ::DestroyWindow(bar->popup_);

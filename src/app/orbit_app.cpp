@@ -50,6 +50,38 @@ constexpr char kGlanceListener[] = R"js((function (send, trigger) {
   }, true);
 }))js";
 
+// A page that paints no background (plain text, JSON, raw HTML) shows the
+// browser scheme's colour, which is dark in a dark theme: black text on dark.
+// Chrome shows white, so such a page gets a white canvas. The rule has no
+// specificity, so any rule of the page's own wins, and it is checked again
+// after loading because setting it stops a later body background from reaching
+// the canvas. Checked with the rule off: it must not see itself.
+constexpr char kPlainPageWhite[] = R"js((function () {
+  if (!/^(https?|file|data):/.test(location.protocol)) return;
+  let sheet = null;
+  const none = (el) => {
+    const s = getComputedStyle(el);
+    return s.backgroundColor === 'rgba(0, 0, 0, 0)' && s.backgroundImage === 'none';
+  };
+  const check = () => {
+    const root = document.documentElement, body = document.body;
+    if (!body || !(root instanceof HTMLElement)) return;
+    if (sheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter((x) => x !== sheet);
+    if (!none(root) || !none(body)) return;
+    if (!sheet) {
+      sheet = new CSSStyleSheet();
+      sheet.replaceSync(':where(html) { background: #fff; }');
+    }
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  };
+  addEventListener('DOMContentLoaded', check, {capture: true, once: true});
+  addEventListener('load', () => {
+    check();
+    setTimeout(check, 1000);
+    setTimeout(check, 3000);
+  }, {capture: true, once: true});
+})())js";
+
 // ZenWindowDragChild: a left press in the top 5% of the top-level page, not
 // over anything the page wants to click, select, drag or scroll, starts a
 // window move once it has moved 4 px. Trusted events only.
@@ -417,6 +449,9 @@ void OrbitApp::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFram
     // Boosts' picker, controlled from the browser (kBoostPickModeMessage).
     CefRefPtr<CefV8Value> installer;
     CefRefPtr<CefV8Exception> exception;
+    context->Eval(kPlainPageWhite, CefString(), 0, installer, exception);
+    installer = nullptr;
+    exception = nullptr;
     if (context->Eval(kBoostPicker, CefString(), 0, installer, exception) && installer && installer->IsFunction()) {
       CefV8ValueList args{CefV8Value::CreateFunction("send", new BoostPickSender())};
       CefRefPtr<CefV8Value> control = installer->ExecuteFunction(nullptr, args);
