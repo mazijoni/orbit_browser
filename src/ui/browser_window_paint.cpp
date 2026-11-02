@@ -78,8 +78,21 @@ bool BrowserWindow::EnsureRenderTarget() {
   }
   rt_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
   rt_->CreateSolidColorBrush(palette_.text, &brush_);
-  favicons_.clear();
   return true;
+}
+
+void BrowserWindow::DiscardRenderTarget() {
+  // Everything here belongs to rt_'s device. One left over from a lost device
+  // (sleep, a driver reset) fails every later frame part way: whatever comes
+  // after it in the frame is never drawn and the old pixels stay.
+  rt_.Reset();
+  brush_.Reset();
+  grain_brush_.Reset();
+  grain_rt_ = nullptr;
+  space_snapshot_.Reset();
+  favicons_.clear();
+  pinned_favicons_.clear();
+  ext_icons_.clear();
 }
 
 void BrowserWindow::Paint() {
@@ -97,12 +110,11 @@ void BrowserWindow::Paint() {
   }
   const HRESULT hr = rt->EndDraw();
   UpdateAnimationTimer(::GetTickCount64());
-  if (hr == D2DERR_RECREATE_TARGET) {
-    space_snapshot_.Reset();  // belongs to the lost device
-    rt_.Reset();
-    brush_.Reset();
-    grain_brush_.Reset();
-    favicons_.clear();
+  // D2DERR_RECREATE_TARGET is the lost device; any other failure is a resource
+  // of another device and would repeat every frame, so both start over.
+  if (FAILED(hr)) {
+    ORBIT_LOG_WARNING("EndDraw failed (0x%08lx); recreating the render target", static_cast<unsigned long>(hr));
+    DiscardRenderTarget();
     Invalidate();
   }
 }

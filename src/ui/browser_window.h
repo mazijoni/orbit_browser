@@ -546,6 +546,7 @@ class BrowserWindow {
   // Painting.
   void Paint();
   bool EnsureRenderTarget();
+  void DiscardRenderTarget();  // rt_ and everything made on its device
   void PaintBackdrop(ID2D1RenderTarget* rt);
   void PaintContentFrame(ID2D1RenderTarget* rt);
   void PaintCaption(ID2D1RenderTarget* rt);

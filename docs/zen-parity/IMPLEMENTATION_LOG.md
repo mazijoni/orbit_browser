@@ -474,6 +474,11 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
   - Limit: a dark page in a light theme still shows a light strip while resizing.
   - Self-test `flash`: 0.0% white in every action (before: up to 10.8% on glance open), and page colours for no background, `html` only, `body` only and a late `body` colour.
   - The `zen` theme picker test now finds its own window's popup: `FindWindow` could return another window's hidden one.
+- 0.2.2 (2026-11-02): **after sleep the chrome streaked, left old pixels behind, and the toolbar's buttons were gone.**
+  - Cause: waking can reset the GPU, which loses the window's Direct2D device. `Paint` rebuilt the target but kept the pinned-tab and extension-icon bitmaps of the lost device. Drawing one fails the rest of the frame (`D2DERR_WRONG_RESOURCE_DOMAIN`, not `D2DERR_RECREATE_TARGET`), so every later frame stopped at the toolbar and was never rebuilt.
+  - `DiscardRenderTarget` drops the target and everything made on it; any failed `EndDraw` of the main window or the compact-mode card now starts over (logged as a warning).
+  - On resume (`WM_POWERBROADCAST`) and `WM_DISPLAYCHANGE` every target is dropped and the whole window repainted.
+  - Checked: a resume and a display change sent to a running window, no errors. A real device loss was not reproduced here: check by sleeping and waking.
 
 ## Next actions
 

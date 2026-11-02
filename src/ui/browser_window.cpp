@@ -4859,6 +4859,24 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_EXITSIZEMOVE:
       Application::Get()->ScheduleSave();
       return 0;
+    case WM_POWERBROADCAST:
+      if (wp != PBT_APMRESUMEAUTOMATIC && wp != PBT_APMRESUMESUSPEND) break;
+      [[fallthrough]];
+    case WM_DISPLAYCHANGE:
+      // After sleep or a display change the GPU may have been reset without
+      // the next EndDraw saying so: start every target over and repaint all.
+      DiscardRenderTarget();
+      overlay_rt_.Reset();
+      overlay_brush_.Reset();
+      overlay_favicons_.clear();
+      overlay_pinned_favicons_.clear();
+      overlay_ext_icons_.clear();
+      popup_rt_.Reset();
+      popup_brush_d2d_.Reset();
+      ::RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
+      if (overlay_) ::InvalidateRect(overlay_, nullptr, FALSE);
+      if (popup_) ::InvalidateRect(popup_, nullptr, FALSE);
+      break;
     case WM_DPICHANGED: {
       dpi_ = HIWORD(wp);
       const RECT* r = reinterpret_cast<const RECT*>(lp);
@@ -8006,7 +8024,7 @@ void BrowserWindow::PaintOverlay() {
   favicons_.swap(overlay_favicons_);
   pinned_favicons_.swap(overlay_pinned_favicons_);
     ext_icons_.swap(overlay_ext_icons_);
-  if (hr == D2DERR_RECREATE_TARGET) {
+  if (FAILED(hr)) {  // a lost device, or a resource of another one (see Paint)
     overlay_rt_.Reset();
     overlay_brush_.Reset();
     overlay_favicons_.clear();
