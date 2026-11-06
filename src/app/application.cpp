@@ -732,6 +732,7 @@ BrowserWindow* Application::OpenWindow(Profile* profile, Workspace* workspace,
     return nullptr;
   }
   raw->ShowWorkspace(workspace, placement ? placement->active_tab_id : 0, start_empty);
+  raw->Show();  // its first frame shows the space, not an empty window
   if (!profile->is_private() && HasInstalledExtensions(*profile)) Extensions(profile);  // toolbar buttons
   ScheduleSave();
   return raw;

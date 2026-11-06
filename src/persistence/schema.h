@@ -4,7 +4,7 @@ namespace orbit {
 
 class Database;
 
-inline constexpr int kSchemaVersion = 14;
+inline constexpr int kSchemaVersion = 15;
 
 // Brings the database schema up to |target| (kSchemaVersion; tests stop at an
 // older version to set up a database to upgrade). Each migration step runs in

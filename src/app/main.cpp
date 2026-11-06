@@ -84,7 +84,14 @@ int RunWinMain(HINSTANCE instance, LPWSTR, int, void* sandbox_info, cef_version_
 
   // Append with shared access: a second launch (forwarded to the running
   // instance below) must not truncate the running instance's log.
-  g_log_file = _wfsopen((user_data / L"orbit.log").c_str(), L"a", _SH_DENYNO);
+  const std::filesystem::path log_path = user_data / L"orbit.log";
+  // It only ever grew: past 2 MB it starts over and the previous one is kept
+  // as orbit.old.log. A running instance holds it open without delete
+  // sharing, so a forwarded launch cannot move it (the rename just fails).
+  if (const auto size = std::filesystem::file_size(log_path, ec); !ec && size > (2u << 20)) {
+    std::filesystem::rename(log_path, user_data / L"orbit.old.log", ec);
+  }
+  g_log_file = _wfsopen(log_path.c_str(), L"a", _SH_DENYNO);
   orbit::log::SetSink(&FileSink);
   if (command_line->HasSwitch("orbit-verbose-log")) {
     orbit::log::SetMinLevel(orbit::log::Level::kVerbose);

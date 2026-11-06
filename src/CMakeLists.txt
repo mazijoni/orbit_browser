@@ -78,6 +78,9 @@ add_library(orbit SHARED
 SET_LIBRARY_TARGET_PROPERTIES(orbit)
 target_include_directories(orbit PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_options(orbit PRIVATE /permissive-)
+# The self-test suites (one file of lambdas) pass the default 65,536 COFF
+# sections in Debug builds.
+set_source_files_properties(app/self_test.cpp PROPERTIES COMPILE_OPTIONS /bigobj)
 configure_file(app/version.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version.h" @ONLY)
 target_include_directories(orbit PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 add_dependencies(orbit libcef_dll_wrapper)

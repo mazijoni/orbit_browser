@@ -2,6 +2,8 @@
 
 #include "persistence/store.h"
 
+#include "core/strings.h"
+
 namespace orbit {
 
 // ---------------------------------------------------------------------------
@@ -12,6 +14,7 @@ int64_t Store::AddVisit(int64_t profile_id, const std::wstring& url, const std::
   auto s = db_.Prepare(
       "INSERT INTO history (profile_id, url, title, visit_time) VALUES (?, ?, ?, ?)");
   s.Bind(1, profile_id).Bind(2, url).Bind(3, title).Bind(4, visit_time);
+  ++history_version_;
   return s.Run() ? db_.LastInsertId() : 0;
 }
 
@@ -21,6 +24,7 @@ bool Store::UpdateLatestVisitTitle(int64_t profile_id, const std::wstring& url,
       "UPDATE history SET title = ?1 WHERE id = (SELECT id FROM history WHERE profile_id = ?2 "
       "AND url = ?3 ORDER BY visit_time DESC LIMIT 1)");
   s.Bind(1, title).Bind(2, profile_id).Bind(3, url);
+  ++history_version_;
   return s.Run();
 }
 
@@ -45,18 +49,17 @@ std::vector<HistoryRecord> Store::QueryHistory(int64_t profile_id, const std::ws
   return out;
 }
 
-std::vector<HistoryRecord> Store::QueryHistoryFrecent(int64_t profile_id, const std::wstring& query,
-                                                      int64_t now_ms, int limit) {
+std::vector<HistoryRecord> Store::LoadHistoryFrecent(int64_t profile_id, int64_t now_ms) {
   std::vector<HistoryRecord> out;
-  // SQLite takes the bare columns (title, id) from the row max() picks.
+  // SQLite takes the bare columns (title, id) from the row max() picks. The
+  // (profile_id, url) index gives the groups in order, without a temp tree.
   auto s = db_.Prepare(
       "SELECT id, url, title, MAX(visit_time), "
       "SUM(CASE WHEN ?2 - visit_time < 345600000 THEN 100 WHEN ?2 - visit_time < 1209600000 THEN 70 "
       "WHEN ?2 - visit_time < 2678400000 THEN 50 WHEN ?2 - visit_time < 7776000000 THEN 30 ELSE 10 END) "
-      "AS frecency FROM history WHERE profile_id = ?1 AND (?3 = '' OR instr(lower(url), lower(?3)) > 0 OR "
-      "instr(lower(title), lower(?3)) > 0) GROUP BY url ORDER BY frecency DESC, MAX(visit_time) DESC "
-      "LIMIT ?4");
-  s.Bind(1, profile_id).Bind(2, now_ms).Bind(3, query).Bind(4, limit);
+      "AS frecency FROM history WHERE profile_id = ?1 GROUP BY url "
+      "ORDER BY frecency DESC, MAX(visit_time) DESC");
+  s.Bind(1, profile_id).Bind(2, now_ms);
   while (s.Step()) {
     HistoryRecord h;
     h.id = s.ColumnInt64(0);
@@ -69,9 +72,36 @@ std::vector<HistoryRecord> Store::QueryHistoryFrecent(int64_t profile_id, const 
   return out;
 }
 
+std::vector<HistoryRecord> Store::QueryHistoryFrecent(int64_t profile_id, const std::wstring& query,
+                                                      int64_t now_ms, int limit) {
+  return FrecentHistory(LoadHistoryFrecent(profile_id, now_ms)).Match(query, limit);
+}
+
+FrecentHistory::FrecentHistory(std::vector<HistoryRecord> ranked) : rows_(std::move(ranked)) {
+  url_lower_.reserve(rows_.size());
+  title_lower_.reserve(rows_.size());
+  for (const HistoryRecord& h : rows_) {
+    url_lower_.push_back(ToLowerAscii(h.url));
+    title_lower_.push_back(ToLowerAscii(h.title));
+  }
+}
+
+std::vector<HistoryRecord> FrecentHistory::Match(const std::wstring& query, int limit) const {
+  std::vector<HistoryRecord> out;
+  const std::wstring q = ToLowerAscii(query);
+  for (size_t i = 0; i < rows_.size() && static_cast<int>(out.size()) < limit; ++i) {
+    if (q.empty() || url_lower_[i].find(q) != std::wstring::npos ||
+        title_lower_[i].find(q) != std::wstring::npos) {
+      out.push_back(rows_[i]);
+    }
+  }
+  return out;
+}
+
 bool Store::DeleteVisit(int64_t profile_id, int64_t id) {
   auto s = db_.Prepare("DELETE FROM history WHERE profile_id = ? AND id = ?");
   s.Bind(1, profile_id).Bind(2, id);
+  ++history_version_;
   return s.Run();
 }
 
@@ -79,6 +109,7 @@ int Store::DeleteHistoryRange(int64_t profile_id, int64_t from, int64_t to) {
   auto s = db_.Prepare(
       "DELETE FROM history WHERE profile_id = ? AND visit_time >= ? AND visit_time < ?");
   s.Bind(1, profile_id).Bind(2, from).Bind(3, to > 0 ? to : INT64_MAX);
+  ++history_version_;
   return s.Run() ? db_.Changes() : -1;
 }
 

@@ -41,6 +41,14 @@ class Graphics {
   const wchar_t* ui_family_ = L"Segoe UI";
 };
 
+// Properties for every HWND render target. By default EndDraw waits for the
+// display's next refresh (measured 6.9 ms at 144 Hz; up to 16.7 ms at 60 Hz):
+// that blocked the CEF UI thread, which also routes input to pages, on every
+// repaint. DWM composes the window anyway, so presenting at once cannot tear.
+inline D2D1_HWND_RENDER_TARGET_PROPERTIES HwndTargetProps(HWND hwnd, D2D1_SIZE_U size) {
+  return D2D1::HwndRenderTargetProperties(hwnd, size, D2D1_PRESENT_OPTIONS_IMMEDIATELY);
+}
+
 // Drawing helpers that operate in DIPs on any render target.
 void DrawGlyph(ID2D1RenderTarget* rt, IDWriteTextFormat* format, wchar_t glyph,
                const D2D1_RECT_F& rect, ID2D1Brush* brush);

@@ -160,6 +160,11 @@ class FaviconCallback : public CefDownloadImageCallback {
 
 }  // namespace
 
+uint32_t NextFaviconGeneration() {
+  static uint32_t generation = 0;
+  return ++generation;
+}
+
 namespace {
 // "example.com" for "https://example.com:8080/path" (lower case), or empty.
 std::wstring HostOf(const std::wstring& url) {
@@ -180,7 +185,7 @@ Tab::Tab(Workspace* workspace, TabRecord record)
       favicon_.width = cached->width;
       favicon_.height = cached->height;
       favicon_.bgra = std::move(cached->bgra);
-      ++favicon_.generation;
+      favicon_.generation = NextFaviconGeneration();
     }
   }
 }
@@ -257,6 +262,7 @@ class DevToolsClient : public CefClient,
 };
 
 Tab::~Tab() {
+  if (Application* app = Application::Get(); app && app->client()) app->client()->ForgetTab(this);
   if (devtools_client_) devtools_client_->Detach();
   DestroyHost();
   if (devtools_host_) ::DestroyWindow(devtools_host_);
@@ -415,7 +421,7 @@ void Tab::ResetToPinned() {
   if (!record_.pinned || record_.pinned_url.empty()) return;
   record_.url = record_.pinned_url;
   favicon_ = pinned_favicon_;
-  ++favicon_.generation;
+  favicon_.generation = NextFaviconGeneration();
   MarkDirty();
   if (load_state_ == LoadState::kLive || load_state_ == LoadState::kCreating) {
     // CEF cannot rewrite session history; a new browser starts with one entry.
@@ -449,6 +455,11 @@ std::wstring Tab::DisplayTitle() const {
 void Tab::TouchActive() {
   record_.last_active = NowUnixMillis();
   MarkDirty();
+}
+
+bool Tab::IsHostWindow(HWND hwnd) {
+  wchar_t cls[32] = {};
+  return hwnd && ::GetClassNameW(hwnd, cls, 32) && std::wstring_view(cls) == kHostClass;
 }
 
 Tab* Tab::FromHost(HWND host) {
@@ -592,7 +603,7 @@ void Tab::Reparent(BrowserWindow* window) {
   }
 }
 
-void Tab::Show(const RECT& r, int corner_px) {
+void Tab::Show(const RECT& r, int corner_px, HWND insert_after) {
   if (!host_) return;
   const SIZE size{r.right - r.left, r.bottom - r.top};
   if (size.cx != region_size_.cx || size.cy != region_size_.cy || corner_px != region_corner_) {
@@ -605,7 +616,7 @@ void Tab::Show(const RECT& r, int corner_px) {
                                 : nullptr;
     ::SetWindowRgn(host_, region, ::IsWindowVisible(host_));  // takes ownership
   }
-  ::SetWindowPos(host_, HWND_TOP, r.left, r.top, size.cx, size.cy,
+  ::SetWindowPos(host_, insert_after, r.left, r.top, size.cx, size.cy,
                  SWP_SHOWWINDOW | SWP_NOACTIVATE);
 }
 
@@ -896,7 +907,7 @@ void Tab::OnAddressChange(const std::wstring& url) {
     if (!favicon_.bgra.empty() || !record_.favicon_url.empty()) {
       favicon_.bgra.clear();
       favicon_.width = favicon_.height = 0;
-      ++favicon_.generation;
+      favicon_.generation = NextFaviconGeneration();
       record_.favicon_url.clear();
       MarkDirty();
     }
@@ -945,7 +956,7 @@ void Tab::OnFaviconUrl(const std::wstring& url) {
     // download (e.g. a missing /favicon.ico) shows the default icon instead.
     favicon_.bgra.clear();
     favicon_.width = favicon_.height = 0;
-    ++favicon_.generation;
+    favicon_.generation = NextFaviconGeneration();
     NotifyChanged();
   }
   record_.favicon_url = url;
@@ -961,7 +972,7 @@ void Tab::OnFaviconImage(int width, int height, std::vector<uint8_t> bgra) {
   favicon_.width = width;
   favicon_.height = height;
   favicon_.bgra = std::move(bgra);
-  ++favicon_.generation;
+  favicon_.generation = NextFaviconGeneration();
   if (profile() && !profile()->is_private()) {
     Application::Get()->store().SaveFavicon(record_.favicon_url, width, height, favicon_.bgra);
   }
@@ -1058,7 +1069,7 @@ void Tab::OnMediaReply(bool playing) {
 }
 
 void Tab::NotifyChanged() {
-  if (BrowserWindow* w = HostWindow()) w->OnDevToolsChanged(this);
+  if (BrowserWindow* w = HostWindow()) w->OnTabChanged(this);
 }
 
 }  // namespace orbit

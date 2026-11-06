@@ -34,6 +34,12 @@ class BrowserClient : public CefClient,
 
   Tab* FindTab(int browser_id) const;
   size_t browser_count() const { return tabs_.size(); }
+  // |tab| is being destroyed: no map may keep it (a popup still being
+  // created when its space went away would be removed again on abort).
+  void ForgetTab(const Tab* tab);
+  // The page menu's "Save link/image/audio/video as" was chosen in browser
+  // |browser_id|: its next download (within a few seconds) asks where to save.
+  void NoteSaveAs(int browser_id);
 
   // CefClient
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
@@ -142,7 +148,9 @@ class BrowserClient : public CefClient,
                            CefRefPtr<CefMenuModel> model) override;
   // Orbit draws the page menu itself (ui::TrackMenu), in the chrome's style.
   // Self-tests: sees the page menu instead of the user (the menu is not shown).
-  static inline std::function<void(CefRefPtr<CefMenuModel>, CefRefPtr<CefContextMenuParams>)> test_menu_observer;
+  // Self-tests: sees the page menu instead of showing it; a command id > 0
+  // runs that item, as if chosen.
+  static inline std::function<int(CefRefPtr<CefMenuModel>, CefRefPtr<CefContextMenuParams>)> test_menu_observer;
   bool RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                       CefRefPtr<CefContextMenuParams> params, CefRefPtr<CefMenuModel> model,
                       CefRefPtr<CefRunContextMenuCallback> callback) override;
@@ -159,6 +167,7 @@ class BrowserClient : public CefClient,
   // The spelling suggestions of the page menu being shown (kMenuSpellFirst + i).
   std::vector<std::wstring> spell_suggestions_;
   std::unordered_map<int, Tab*> pending_popups_;  // popup id -> tab
+  std::unordered_map<int, ULONGLONG> save_as_until_;  // browser id -> deadline (see NoteSaveAs)
   // Native popup windows (window.open with sizes: OAuth / sign-in). These are
   // real OS windows owned by their opener, not sidebar tabs, so window.close()
   // works and focus returns to the opener. Tracked by browser id.

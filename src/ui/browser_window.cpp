@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
+#include <utility>
 
 #include "app/application.h"
 #include "app/installer.h"
@@ -63,6 +64,10 @@ constexpr uint32_t kFolderAnimMs = 180;    // ZenFolders #folderAnimationDuratio
 constexpr uint32_t kGlanceAnimMs = 350;    // zen.glance.animation-duration
 constexpr UINT kCompactFlashMs = 800;      // zen.view.compact.toolbar-flash-popup.duration
 constexpr UINT_PTR kSwipeEndTimer = 9;
+// A tab switch lands this long after the next page's host is shown under the
+// current one: two frames at 60 Hz for its compositor to present again.
+constexpr UINT_PTR kSwitchTimer = 10;
+constexpr UINT kSwitchCoverMs = 40;
 constexpr UINT kSwipeEndMs = 120;          // no more wheel events: the fingers lifted
 constexpr float kSwipePxPerNotch = 70.f;   // one wheel notch drags this far (DIPs)
 constexpr float kSwipeSuccess = 0.25f;     // ZenSpacesSwipe.SUCCESS_THRESHOLD
@@ -74,6 +79,10 @@ constexpr int kAddressId = 100;
 constexpr UINT kAccessibleInvokeMessage = WM_APP + 1;  // wParam: kind, lParam: key
 constexpr UINT kHidePopupMessage = WM_APP + 2;
 constexpr UINT kCancelRenameMessage = WM_APP + 4;
+// The animation timer stopped: windows moved per frame (the page card, the
+// library, the compact card) go to where they rest. The last frame placed
+// them at that frame's value, short of the end.
+constexpr UINT kSettleAnimationMessage = WM_APP + 8;
 constexpr float kInner = 7.f;            // sidebar content inset (toolbox padding + tab margin)
 constexpr float kButton = 28.f;          // sidebar toolbar button
 constexpr float kFolderIndent = 12.f;    // --zen-folder-indent
@@ -420,7 +429,7 @@ bool BrowserWindow::Create(const WindowRecord* placement) {
 
   ApplyTheme();
 
-  int show = SW_SHOWNORMAL;
+  show_cmd_ = SW_SHOWNORMAL;
   if (placement && placement->w > 0 && placement->h > 0) {
     RECT r{placement->x, placement->y, placement->x + placement->w,
            placement->y + placement->h};
@@ -430,12 +439,22 @@ bool BrowserWindow::Create(const WindowRecord* placement) {
       wp.showCmd = SW_HIDE;
       ::SetWindowPlacement(hwnd_, &wp);
     }
-    if (placement->maximized) show = SW_SHOWMAXIMIZED;
+    if (placement->maximized) show_cmd_ = SW_SHOWMAXIMIZED;
   }
   Layout();
-  ::ShowWindow(hwnd_, show);
-  ::UpdateWindow(hwnd_);
   return true;
+}
+
+void BrowserWindow::Show() {
+  if (!hwnd_ || ::IsWindowVisible(hwnd_)) return;
+  ::ShowWindow(hwnd_, show_cmd_);
+  ::UpdateWindow(hwnd_);
+  // The URL bar ShowWorkspace asked for (an empty tab) opens now, after the
+  // window: opened before, the window's activation took its focus and it
+  // closed again.
+  if (const auto bar = std::exchange(url_bar_on_show_, std::nullopt)) {
+    ShowFloatingUrlBar(bar->new_tab, bar->select_all, bar->anchor);
+  }
 }
 
 void BrowserWindow::Destroy() {
@@ -1011,6 +1030,31 @@ void BrowserWindow::ShowContent() {
       }
     }
   }
+  // A page that has painted before comes back (a tab switch, the next tab
+  // after a close): its host goes under the page still on screen, which
+  // covers it until the switch lands (kSwitchTimer). Switching again
+  // meanwhile keeps the same cover.
+  if (HWND cover = commit_switch_ || visible.size() != 1 ? nullptr : SwitchCover(visible.front(), rects.front())) {
+    Tab* next = visible.front();
+    if (switching_to_ && switching_to_ != next) switching_to_->Hide();
+    next->Show(rects.front(), ContentCornerPx(), cover);
+    MoveOverlay();
+    if (switching_to_ != next) {
+      // Not restarted by later calls for the same switch (a title change of
+      // the next page): it lands on time however busy the page is.
+      switching_to_ = next;
+      ::SetTimer(hwnd_, kSwitchTimer, kSwitchCoverMs, nullptr);
+    }
+    return;
+  }
+  if (switching_to_) {
+    ::KillTimer(hwnd_, kSwitchTimer);
+    // Dropped (the user went back to the page on screen): hidden again.
+    if (std::find(visible.begin(), visible.end(), switching_to_) == visible.end()) {
+      content_shown_.push_back(switching_to_);  // hidden below if still alive
+    }
+    switching_to_ = nullptr;
+  }
   // Hide what is no longer on screen (tabs that still exist somewhere).
   for (Tab* t : content_shown_) {
     if (std::find(visible.begin(), visible.end(), t) != visible.end()) continue;
@@ -1042,6 +1086,25 @@ void BrowserWindow::ShowContent() {
   }
   content_shown_ = std::move(visible);
   MoveOverlay();  // tab hosts raise themselves; the card stays above them
+}
+
+HWND BrowserWindow::SwitchCover(Tab* next, const RECT& rect) const {
+  // The next page: plain (no glance, DevTools or page fullscreen) and live,
+  // so it has painted before. A new page has nothing to show sooner.
+  if (glance_ || content_fullscreen_ || !next->host() || next->window() != this ||
+      next->load_state() != Tab::LoadState::kLive || next->devtools_open() || next->crashed()) {
+    return nullptr;
+  }
+  if (next != switching_to_ && ::IsWindowVisible(next->host())) return nullptr;  // already on screen
+  // The topmost tab host on screen, if it covers the whole page area.
+  for (HWND h = ::GetWindow(hwnd_, GW_CHILD); h; h = ::GetWindow(h, GW_HWNDNEXT)) {
+    if (h == next->host() || !::IsWindowVisible(h) || !Tab::IsHostWindow(h)) continue;
+    RECT r;
+    ::GetWindowRect(h, &r);
+    ::MapWindowPoints(nullptr, hwnd_, reinterpret_cast<POINT*>(&r), 2);
+    return ::EqualRect(&r, &rect) ? h : nullptr;
+  }
+  return nullptr;
 }
 
 int BrowserWindow::VisibleRowCapacity() const {
@@ -1640,8 +1703,12 @@ void BrowserWindow::InspectElement(Tab* tab, int x, int y) {
 }
 
 void BrowserWindow::OnTabChanged(Tab* tab) {
+  // Every change a tab reports (URL, title, loading, favicon, media, load
+  // state): the address field, title, spinner and media card follow it.
+  if (closing_) return;
   UpdateMediaCard();
   if (tab == active_tab()) {
+    ShowContent();  // a load state change can change what shows (DevTools, panes)
     UpdateAddressBar(false);
     UpdateTitle();
   }
@@ -1671,12 +1738,18 @@ void BrowserWindow::OnTabRemoving(Tab* tab) {
     Layout();
   }
   std::erase(content_shown_, tab);
+  if (tab == switching_to_) {
+    ::KillTimer(hwnd_, kSwitchTimer);
+    switching_to_ = nullptr;
+  }
   if (tab == fullscreen_tab_) {
     fullscreen_tab_ = nullptr;
     if (content_fullscreen_) SetContentFullscreen(nullptr, false);
   }
   favicons_.erase(tab);
   pinned_favicons_.erase(tab);
+  overlay_favicons_.erase(tab);  // the compact card's caches too
+  overlay_pinned_favicons_.erase(tab);
   if (tab == rename_tab_) CancelRename();
   if (tab == focus_guard_tab_) focus_guard_tab_ = nullptr;
   // Nothing may keep pointing at a tab that leaves this window.
@@ -1690,7 +1763,7 @@ void BrowserWindow::OnTabRemoving(Tab* tab) {
   }
   if (tab == active_essential_) {
     active_essential_ = nullptr;
-    tab->Hide();
+    if (!tab->close_requested()) tab->Hide();  // as below
     Tab* back = workspace_ ? workspace_->active_tab() : nullptr;
     if (workspace_) workspace_->set_active_tab(nullptr);
     if (!back && workspace_ && !workspace_->tabs().empty()) {
@@ -1702,7 +1775,10 @@ void BrowserWindow::OnTabRemoving(Tab* tab) {
   if (!workspace_ || tab != workspace_->active_tab()) return;
   Tab* next = TabToSelectOnClose(tab);
   tab->set_owner(nullptr);
-  tab->Hide();
+  // A closing page stays up as the next one's cover (ShowContent) until that
+  // one lands; its host is hidden and destroyed as Chromium lets go of it.
+  // A tab moving to another window leaves at once.
+  if (!tab->close_requested()) tab->Hide();
   workspace_->set_active_tab(nullptr);
   if (next) ActivateTab(next);
 }
@@ -1834,6 +1910,11 @@ void BrowserWindow::DetachWorkspace() {
   CancelRename();
   for (Tab* t : content_shown_) t->Hide();
   content_shown_.clear();
+  if (switching_to_) {
+    ::KillTimer(hwnd_, kSwitchTimer);
+    switching_to_->Hide();
+    switching_to_ = nullptr;
+  }
   if (active_essential_) {
     active_essential_->Hide();
     active_essential_ = nullptr;
@@ -2616,6 +2697,7 @@ void BrowserWindow::UpdateAnimationTimer(uint64_t now) {
     ::SetTimer(hwnd_, kAnimTimer, kAnimFrameMs, nullptr);
   } else {
     ::KillTimer(hwnd_, kAnimTimer);
+    ::PostMessageW(hwnd_, kSettleAnimationMessage, 0, 0);
   }
 }
 
@@ -3656,7 +3738,15 @@ void BrowserWindow::FocusAddressBar() {
 }
 
 void BrowserWindow::FocusContent() {
-  if (Tab* tab = active_tab()) tab->Focus();
+  Tab* tab = active_tab();
+  if (tab && tab->browser()) {
+    tab->Focus();
+    return;
+  }
+  // No page yet (its browser is being created). The address field lets go
+  // of the keyboard: BrowserClient::OnSetFocus refuses the page's focus
+  // while the field has it, which kept the keyboard there for good.
+  if (AddressBarHasFocus() && !popup_visible_) ::SetFocus(hwnd_);
 }
 
 void BrowserWindow::UpdateAddressBar(bool force) {
@@ -3817,6 +3907,10 @@ LRESULT CALLBACK BrowserWindow::AddressProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 // Floating URL bar
 
 void BrowserWindow::ShowFloatingUrlBar(bool new_tab, bool select_all, PopupAnchor anchor) {
+  if (!::IsWindowVisible(hwnd_)) {
+    url_bar_on_show_ = PendingUrlBar{new_tab, select_all, anchor};  // see Show()
+    return;
+  }
   if (!popup_ || closing_) return;
   GuardAddressFocus();
   if (popup_visible_ && (new_tab_mode_ != new_tab || popup_anchor_ != anchor)) {
@@ -3917,7 +4011,13 @@ void BrowserWindow::UpdateUrlResults() {
       ::GetSystemTimeAsFileTime(&ft);
       const int64_t now = static_cast<int64_t>(
           ((static_cast<uint64_t>(ft.dwHighDateTime) << 32 | ft.dwLowDateTime) / 10000) - 11644473600000ULL);
-      for (const auto& v : store.QueryHistoryFrecent(profile_->id(), longest, now, 50)) {
+      if (!history_rank_ || history_rank_profile_ != profile_->id() ||
+          history_rank_version_ != store.history_version()) {
+        history_rank_.emplace(store.LoadHistoryFrecent(profile_->id(), now));
+        history_rank_profile_ = profile_->id();
+        history_rank_version_ = store.history_version();
+      }
+      for (const auto& v : history_rank_->Match(longest, 50)) {
         sources.history.push_back({v.url, v.title, 0});
       }
     }
@@ -4047,6 +4147,7 @@ void BrowserWindow::ActivateUrlResult(int index) {
 
 void BrowserWindow::HideFloatingUrlBar(bool restore_text) {
   if (!popup_visible_) return;
+  history_rank_.reset();  // a list of every visited URL: not kept while closed
   if (new_tab_mode_) {
     if (new_tab_navigated_) {
       last_new_tab_search_.clear();
@@ -5086,6 +5187,12 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     }
+    case kSettleAnimationMessage:
+      if (closing_ || anim_timer_running_) return 0;  // a new animation settles itself
+      MoveOverlay();
+      if (library_host_ && library_open_) PlaceLibrary();
+      PlaceContent();
+      return 0;
     case kCancelRenameMessage:
       if (renaming() && ::GetFocus() != rename_edit_) CancelRename();  // blur cancels (#halt)
       return 0;
@@ -5148,6 +5255,11 @@ LRESULT BrowserWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         Invalidate();
       } else if (wp == kSwipeEndTimer) {
         EndSwipe();
+      } else if (wp == kSwitchTimer) {
+        ::KillTimer(hwnd_, kSwitchTimer);
+        commit_switch_ = true;
+        ShowContent();  // the next page comes up and the cover goes
+        commit_switch_ = false;
       } else if (wp == kSpinnerTimer) {
         spinner_phase_ = std::fmod(spinner_phase_ + 0.12f, 1.f);
         Invalidate();
@@ -5509,6 +5621,12 @@ void BrowserWindow::OnMouseWheel(int delta) {
   if (InSidebar(x) && y >= list_.top && y < list_.bottom) {
     scroll_ -= static_cast<float>(delta) / WHEEL_DELTA * ui::metrics::kRowHeight * 2.f;
     ClampScroll();
+    // Another row is under the pointer now: the hover (and its tooltip)
+    // follows it rather than the row that scrolled away.
+    if (const Hit hit = HitTest(x, y); !(hit == hover_)) {
+      hover_ = hit;
+      UpdateTooltip(hit);
+    }
     Invalidate();
   }
 }
@@ -7886,8 +8004,10 @@ void BrowserWindow::OpenInternalPage(int page) {
 
 void BrowserWindow::UpdateSpinnerTimer() {
   bool any_loading = false;
-  if (workspace_) {
-    for (const auto& t : workspace_->tabs()) any_loading = any_loading || t->loading();
+  // The rows and the Essentials grid both draw a spinner for a loading tab.
+  for (const Workspace* ws : {static_cast<const Workspace*>(workspace_), static_cast<const Workspace*>(essentials())}) {
+    if (!ws) continue;
+    for (const auto& t : ws->tabs()) any_loading = any_loading || t->loading();
   }
   if (any_loading && !spinner_running_) {
     ::SetTimer(hwnd_, kSpinnerTimer, kSpinnerIntervalMs, nullptr);
@@ -7991,7 +8111,7 @@ void BrowserWindow::PaintOverlay() {
         D2D1_RENDER_TARGET_TYPE_DEFAULT,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
         static_cast<float>(dpi_), static_cast<float>(dpi_));
-    const auto hwnd_props = D2D1::HwndRenderTargetProperties(
+    const auto hwnd_props = ui::HwndTargetProps(
         overlay_, D2D1::SizeU(static_cast<UINT32>(overlay_size_.cx),
                               static_cast<UINT32>(overlay_size_.cy)));
     if (FAILED(ui::Graphics::Get().d2d()->CreateHwndRenderTarget(props, hwnd_props,

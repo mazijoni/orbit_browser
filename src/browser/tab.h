@@ -29,8 +29,13 @@ struct FaviconPixels {
   int width = 0;
   int height = 0;
   std::vector<uint8_t> bgra;  // premultiplied BGRA
-  uint32_t generation = 0;    // bumped on change so views can cache bitmaps
+  uint32_t generation = 0;    // NextFaviconGeneration() on change so views can cache bitmaps
 };
+
+// A process-wide counter, so no two images ever share a generation. Views
+// cache bitmaps by Tab*, and a closed tab's address can come back as a new
+// tab: per-tab counters let that tab show the old one's icon.
+uint32_t NextFaviconGeneration();
 
 // One sidebar entry. A Tab exists independently of its Chromium browser: an
 // unloaded (restored-but-not-yet-shown or discarded) tab keeps its URL, title
@@ -118,8 +123,9 @@ class Tab {
   void PrepareForPopup(BrowserWindow* window, CefWindowInfo& info);
   // Moves the host HWND under another top-level window.
   void Reparent(BrowserWindow* window);
-  // Places the host at |bounds_px| with rounded corners of |corner_px|.
-  void Show(const RECT& bounds_px, int corner_px);
+  // Places the host at |bounds_px| with rounded corners of |corner_px|, on top
+  // of its siblings or right below |insert_after|.
+  void Show(const RECT& bounds_px, int corner_px, HWND insert_after = HWND_TOP);
   void Hide();  // the page and its DevTools
 
   // DevTools docked beside the page, in a pane of the tab's window (F12,
@@ -219,6 +225,7 @@ class Tab {
   void ForgetMedia() { media_frames_.clear(); }
 
   static Tab* FromHost(HWND host);
+  static bool IsHostWindow(HWND hwnd);  // a tab's host, its tab live or closing
   // Hosts waiting for their Chrome-style widget to finish closing; a window
   // must not be destroyed while any remain (its child widget would crash).
   static int PendingHostDestroys();

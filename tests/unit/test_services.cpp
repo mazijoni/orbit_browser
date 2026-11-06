@@ -117,6 +117,45 @@ TEST(History_FrecencyRanksFrequentRecentPages) {
   }
 }
 
+TEST(History_FrecentMatchingKeepsRankAndLimit) {
+  Fixture f;
+  const int64_t day = 86400000;
+  const int64_t now = 400 * day;
+  for (int i = 0; i < 3; ++i) f.store.AddVisit(f.profile, L"https://github.com/orbit", L"Orbit Repo", now - i);
+  f.store.AddVisit(f.profile, L"https://news.example/", L"GitHub news", now - day);
+  f.store.AddVisit(f.profile, L"https://other.example/", L"Nothing", now - 2 * day);
+  f.store.AddVisit(f.other, L"https://github.com/elsewhere", L"Other profile", now);
+  const FrecentHistory ranked(f.store.LoadHistoryFrecent(f.profile, now));
+  EXPECT_EQ(ranked.size(), 3u);  // one row per URL, this profile only
+  const auto git = ranked.Match(L"GIT", 10);  // URL or title, any case
+  EXPECT_EQ(git.size(), 2u);
+  if (git.size() == 2) {
+    EXPECT_WEQ(git[0].url, L"https://github.com/orbit");  // three visits rank first
+    EXPECT_WEQ(git[1].url, L"https://news.example/");     // matched by its title
+  }
+  EXPECT_EQ(ranked.Match(L"", 10).size(), 3u);
+  EXPECT_EQ(ranked.Match(L"", 1).size(), 1u);
+  EXPECT_EQ(ranked.Match(L"absent", 10).size(), 0u);
+  // The same answer through the store's one-shot query.
+  EXPECT_EQ(f.store.QueryHistoryFrecent(f.profile, L"git", now, 10).size(), 2u);
+}
+
+TEST(History_VersionChangesWithEveryWrite) {
+  Fixture f;
+  uint64_t v = f.store.history_version();
+  const int64_t id = f.store.AddVisit(f.profile, L"https://a.example/", L"A", 1000);
+  EXPECT_TRUE(f.store.history_version() != v);
+  v = f.store.history_version();
+  f.store.UpdateLatestVisitTitle(f.profile, L"https://a.example/", L"A2");
+  EXPECT_TRUE(f.store.history_version() != v);
+  v = f.store.history_version();
+  f.store.DeleteVisit(f.profile, id);
+  EXPECT_TRUE(f.store.history_version() != v);
+  v = f.store.history_version();
+  f.store.DeleteHistoryRange(f.profile, 0, 0);
+  EXPECT_TRUE(f.store.history_version() != v);
+}
+
 TEST(History_DeleteRangeAndSingle) {
   Fixture f;
   for (int i = 0; i < 10; ++i) f.store.AddVisit(f.profile, L"https://a/" + std::to_wstring(i), L"", 100 * i);

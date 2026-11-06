@@ -152,7 +152,7 @@ void Paint(State& st, Level& level) {
                                                                       D2D1_ALPHA_MODE_IGNORE),
                                                     dpi, dpi);
     if (FAILED(Graphics::Get().d2d()->CreateHwndRenderTarget(
-            props, D2D1::HwndRenderTargetProperties(level.hwnd, D2D1::SizeU(rc.right, rc.bottom)), &level.rt))) {
+            props, HwndTargetProps(level.hwnd, D2D1::SizeU(rc.right, rc.bottom)), &level.rt))) {
       return;
     }
     level.rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);

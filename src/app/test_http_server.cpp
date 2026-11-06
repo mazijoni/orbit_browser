@@ -3,6 +3,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <string>
 
@@ -141,6 +142,10 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
                   "s.textContent = 'body{background:#101014}'; document.head.append(s); }, 300));</script>"
                 : "") +
            "</body>";
+  } else if (path == "/slow") {
+    // Stays loading for a while (the loading indicator's test).
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    body = "<!doctype html><title>Slow</title><body>slow page</body>";
   } else if (path == "/media") {
     // Plays the test tone with MediaSession metadata (the media card's source).
     body = "<!doctype html><title>media</title><audio id=a src=\"/tone.wav\" loop></audio><script>"
@@ -262,6 +267,13 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
            "height:200px;background:#ddd}</style><a id=l href=\"/page?t=Glanced\">glance me</a>"
            "<script>l.addEventListener('click', e => { if (!e.isTrusted) { e.preventDefault();"
            "document.title = 'SYNTH'; } });</script>";
+  } else if (path == "/saveables") {
+    // A link (top), an image (below it) and empty page: the page menu's
+    // "Save ... as" items.
+    body = "<!doctype html><title>saveables</title><style>body{margin:0}a,img{display:block;width:300px;"
+           "height:120px}a{background:#ddd}</style><a href=\"/file.bin\">a file</a>"
+           "<img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQ"
+           "DwAEhQGAhKmMIQAAAABJRU5ErkJggg==\"><audio controls src=\"/tone.wav\" style=\"display:block;width:300px\"></audio>";
   } else if (path == "/feed") {
     // An RSS feed for live folders: one item per id in "items".
     body = "<?xml version=\"1.0\" encoding=\"utf-8\"?><rss version=\"2.0\"><channel>"
@@ -293,6 +305,11 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
     body = "<!doctype html><ul><li><a data-testid=\"issue-listitem-title-link\" "
            "href=\"/orbit/browser/issues/12\">Crash on start</a><a data-testid=\"author-filter-link\" "
            "href=\"#\">carol</a></li></ul>";
+  } else if (path == "/slowfile") {
+    // A download that is still running for a while (sent in two halves).
+    body.assign(kFileSize, 'y');
+    type = "application/octet-stream";
+    extra = "Content-Disposition: attachment; filename=\"slow.bin\"\r\n";
   } else if (path == "/file.bin") {
     body.assign(kFileSize, 'x');
     type = "application/octet-stream";
@@ -347,6 +364,13 @@ void TestHttpServer::Serve(uintptr_t client_handle) {
                          "\r\nContent-Type: " + type + "\r\nContent-Length: " +
                          std::to_string(body.size()) + "\r\nConnection: close\r\n" + extra +
                          "\r\n" + body;
+  if (path == "/slowfile") {
+    const size_t half = response.size() - body.size() / 2;
+    SendAll(client, response.substr(0, half));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    SendAll(client, response.substr(half));
+    return;
+  }
   SendAll(client, response);
 }
 

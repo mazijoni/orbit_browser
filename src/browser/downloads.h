@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -28,10 +29,13 @@ class DownloadManager {
 
   DownloadManager() = default;
 
-  // CefDownloadHandler hooks (from BrowserClient).
-  void OnBeforeDownload(Profile* profile, CefRefPtr<CefDownloadItem> item,
+  // CefDownloadHandler hooks (from BrowserClient). |save_as|: the user chose
+  // "Save link/image/video as" for it, so Orbit asks where to save (as with
+  // the "always ask" setting) in a dialog owned by |owner|. Returns false
+  // when the download waits for that dialog.
+  bool OnBeforeDownload(Profile* profile, CefRefPtr<CefDownloadItem> item,
                         const CefString& suggested_name,
-                        CefRefPtr<CefBeforeDownloadCallback> callback);
+                        CefRefPtr<CefBeforeDownloadCallback> callback, bool save_as, HWND owner);
   void OnDownloadUpdated(CefRefPtr<CefDownloadItem> item,
                          CefRefPtr<CefDownloadItemCallback> callback);
 
@@ -56,14 +60,33 @@ class DownloadManager {
   // Returns a path in |dir| that no existing file or in-flight download uses.
   std::filesystem::path UniquePath(const std::filesystem::path& dir,
                                    const std::wstring& file_name) const;
+  // A download is written to "<name>.crdownload" and renamed to its name when
+  // it completes, so an unfinished file never looks finished.
+  static constexpr wchar_t kPartialSuffix[] = L".crdownload";
+
+  // Self-tests: answers the "Save as" dialog (nullopt: cancelled).
+  static inline std::function<std::optional<std::filesystem::path>(const std::filesystem::path& suggested)>
+      test_choose_path;
 
  private:
   struct Live {
     const Profile* profile = nullptr;
-    Item item;
+    Item item;  // item.record.path: the finished file's path
+    std::filesystem::path partial;  // where Chromium writes until it completes
+    bool chosen = false;            // the user picked the path (may replace a file)
     CefRefPtr<CefDownloadItemCallback> control;
     ULONGLONG last_persist = 0;
   };
+  // What a download needs from Chromium's item to start once a path is known.
+  struct Pending {
+    uint32_t cef_id = 0;
+    std::wstring url;
+    std::wstring mime_type;
+    int64_t total_bytes = 0;
+  };
+  void Start(Profile* profile, const Pending& pending, const std::filesystem::path& path, bool chosen,
+             CefRefPtr<CefBeforeDownloadCallback> callback);
+  bool MovePartialToFinal(Live& live);
   struct PrivateDone {
     const Profile* profile = nullptr;
     Item item;

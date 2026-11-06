@@ -90,7 +90,6 @@ std::string ReadFile(const std::filesystem::path& path) {
 
 // A "data:image/png;base64,..." icon as premultiplied BGRA (the toolbar's).
 FaviconPixels DecodeIcon(const std::string& data_url) {
-  static uint32_t generation = 0;
   FaviconPixels out;
   constexpr char kPng[] = "data:image/png;base64,";
   if (data_url.rfind(kPng, 0) != 0) return out;
@@ -105,7 +104,7 @@ FaviconPixels DecodeIcon(const std::string& data_url) {
   out.height = h;
   out.bgra.resize(static_cast<size_t>(w) * h * 4);
   bgra->GetData(out.bgra.data(), out.bgra.size(), 0);
-  out.generation = ++generation;
+  out.generation = NextFaviconGeneration();
   return out;
 }
 

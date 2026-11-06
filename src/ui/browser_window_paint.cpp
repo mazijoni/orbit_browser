@@ -70,7 +70,7 @@ bool BrowserWindow::EnsureRenderTarget() {
       D2D1_RENDER_TARGET_TYPE_DEFAULT,
       D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
       static_cast<float>(dpi_), static_cast<float>(dpi_));
-  const auto hwnd_props = D2D1::HwndRenderTargetProperties(
+  const auto hwnd_props = ui::HwndTargetProps(
       hwnd_, D2D1::SizeU(static_cast<UINT32>(rc.right), static_cast<UINT32>(rc.bottom)));
   if (FAILED(ui::Graphics::Get().d2d()->CreateHwndRenderTarget(props, hwnd_props, &rt_))) {
     ORBIT_LOG_ERROR("CreateHwndRenderTarget failed");
@@ -97,6 +97,7 @@ void BrowserWindow::DiscardRenderTarget() {
 
 void BrowserWindow::Paint() {
   if (!EnsureRenderTarget()) return;
+  if (!workspace_) ++paints_without_space_;
   ID2D1RenderTarget* rt = rt_.Get();
   rt->BeginDraw();
   if (chrome_hidden()) {
@@ -1346,7 +1347,7 @@ void BrowserWindow::PaintPopup() {
         D2D1_RENDER_TARGET_TYPE_DEFAULT,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
         static_cast<float>(dpi_), static_cast<float>(dpi_));
-    const auto hwnd_props = D2D1::HwndRenderTargetProperties(
+    const auto hwnd_props = HwndTargetProps(
         popup_, D2D1::SizeU(static_cast<UINT32>(rc.right), static_cast<UINT32>(rc.bottom)));
     if (FAILED(Graphics::Get().d2d()->CreateHwndRenderTarget(props, hwnd_props, &popup_rt_))) {
       return;

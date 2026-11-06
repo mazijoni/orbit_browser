@@ -36,6 +36,15 @@ constexpr int kMenuGlanceLink = MENU_ID_USER_FIRST + 2;
 constexpr int kMenuInspect = MENU_ID_USER_FIRST + 3;
 // Chrome's IDC_CONTENT_CONTEXT_INSPECTELEMENT (chrome_command_ids.h).
 constexpr int kChromeInspectElement = 50162;
+// Chromium's page-menu "Save ... as" items (read off the menu, CEF 154): they
+// start an ordinary download, which Orbit otherwise saves without asking.
+// The page's own "Save as..." (35004) shows Chromium's dialog itself.
+constexpr int kChromeSaveLinkAs = 50103;
+constexpr int kChromeSaveImageAs = 50120;
+constexpr int kChromeSaveMediaAs = 50131;  // audio and video
+bool IsSaveAsCommand(int id) {
+  return id == kChromeSaveLinkAs || id == kChromeSaveImageAs || id == kChromeSaveMediaAs;
+}
 constexpr int kMenuNewTabLink = MENU_ID_USER_FIRST + 4;
 constexpr int kMenuCopyLink = MENU_ID_USER_FIRST + 5;
 constexpr int kMenuSearchSelection = MENU_ID_USER_FIRST + 6;
@@ -228,8 +237,12 @@ bool BrowserClient::RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefF
   Tab* tab = FindTab(browser->GetIdentifier());
   if (!WindowFor(tab) || model->GetCount() == 0) return false;
   if (test_menu_observer) {
-    test_menu_observer(model, params);
-    callback->Cancel();
+    if (const int cmd = test_menu_observer(model, params); cmd > 0) {
+      if (IsSaveAsCommand(cmd)) NoteSaveAs(browser->GetIdentifier());
+      callback->Continue(cmd, EVENTFLAG_NONE);
+    } else {
+      callback->Cancel();
+    }
     return true;
   }
   HMENU menu = BuildMenu(model);
@@ -244,6 +257,7 @@ bool BrowserClient::RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefF
                             const UINT cmd = w ? ui::TrackMenu(menu, 0, pt.x, pt.y, w->hwnd(), w->palette()) : 0;
                             ::DestroyMenu(menu);
                             if (cmd) {
+                              if (app && IsSaveAsCommand(static_cast<int>(cmd))) app->client()->NoteSaveAs(browser_id);
                               callback->Continue(static_cast<int>(cmd), EVENTFLAG_NONE);
                             } else {
                               callback->Cancel();
@@ -370,6 +384,15 @@ bool BrowserClient::OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFr
   return false;
 }
 
+void BrowserClient::NoteSaveAs(int browser_id) {
+  save_as_until_[browser_id] = ::GetTickCount64() + 15000;
+}
+
+void BrowserClient::ForgetTab(const Tab* tab) {
+  std::erase_if(pending_popups_, [tab](const auto& entry) { return entry.second == tab; });
+  std::erase_if(tabs_, [tab](const auto& entry) { return entry.second == tab; });
+}
+
 void BrowserClient::OnBeforePopupAborted(CefRefPtr<CefBrowser> browser, int popup_id) {
   auto it = pending_popups_.find(popup_id);
   if (it == pending_popups_.end()) return;
@@ -425,6 +448,7 @@ void BrowserClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     Application::Get()->OnWindowBrowserClosed();  // in case a window close waits
     return;
   }
+  save_as_until_.erase(browser->GetIdentifier());
   auto it = tabs_.find(browser->GetIdentifier());
   ORBIT_LOG_VERBOSE("browser %d OnBeforeClose (known=%d)", browser->GetIdentifier(),
                      it != tabs_.end() ? 1 : 0);
@@ -621,9 +645,16 @@ bool BrowserClient::OnBeforeDownload(CefRefPtr<CefBrowser> browser,
                                      const CefString& suggested_name,
                                      CefRefPtr<CefBeforeDownloadCallback> callback) {
   Tab* tab = FindTab(browser->GetIdentifier());
-  Application::Get()->downloads().OnBeforeDownload(tab ? tab->profile() : nullptr, download_item,
-                                                   suggested_name, callback);
-  if (BrowserWindow* window = tab ? tab->window() : nullptr) window->AnimateDownload();
+  bool save_as = false;
+  if (auto it = save_as_until_.find(browser->GetIdentifier()); it != save_as_until_.end()) {
+    save_as = ::GetTickCount64() < it->second;
+    save_as_until_.erase(it);
+  }
+  BrowserWindow* window = tab ? tab->window() : nullptr;
+  const bool started = Application::Get()->downloads().OnBeforeDownload(
+      tab ? tab->profile() : nullptr, download_item, suggested_name, callback, save_as,
+      window ? window->hwnd() : nullptr);
+  if (window && started) window->AnimateDownload();  // not over a Save dialog
   return true;
 }
 

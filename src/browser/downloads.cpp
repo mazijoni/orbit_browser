@@ -5,13 +5,19 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#include <shobjidl.h>
+#include <wrl/client.h>
+
 #include <algorithm>
+#include <cwctype>
 #include <fstream>
 
 #include "app/application.h"
 #include "browser/profile.h"
 #include "core/log.h"
 #include "core/strings.h"
+#include "include/base/cef_callback.h"
+#include "include/wrapper/cef_closure_task.h"
 #include "ui/browser_window.h"
 
 namespace orbit {
@@ -44,6 +50,7 @@ std::filesystem::path DownloadManager::UniquePath(const std::filesystem::path& d
   auto in_use = [&](const std::filesystem::path& p) {
     std::error_code ec;
     if (std::filesystem::exists(p, ec)) return true;
+    if (std::filesystem::exists(p.wstring() + kPartialSuffix, ec)) return true;  // an unfinished one
     for (const auto& [id, live] : live_) {
       if (_wcsicmp(live.item.record.path.c_str(), p.c_str()) == 0) return true;
     }
@@ -56,32 +63,134 @@ std::filesystem::path DownloadManager::UniquePath(const std::filesystem::path& d
   return candidate;
 }
 
-void DownloadManager::OnBeforeDownload(Profile* profile, CefRefPtr<CefDownloadItem> item,
-                                       const CefString& suggested_name,
-                                       CefRefPtr<CefBeforeDownloadCallback> callback) {
-  Application* app = Application::Get();
-  const bool ask = app->store().GetPref(Store::kGlobalScope, L"download_ask") == L"1";
-  const std::filesystem::path target = UniquePath(Directory(), suggested_name.ToWString());
+namespace {
 
+// The Windows "Save as" dialog, opening on |suggested| (folder and name).
+std::optional<std::filesystem::path> ChooseSavePath(HWND owner, const std::filesystem::path& suggested) {
+  if (DownloadManager::test_choose_path) return DownloadManager::test_choose_path(suggested);
+  Microsoft::WRL::ComPtr<IFileSaveDialog> dialog;
+  if (FAILED(::CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+    return std::nullopt;
+  }
+  DWORD options = 0;
+  dialog->GetOptions(&options);
+  dialog->SetOptions(options | FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+  const std::wstring ext = suggested.extension().wstring();
+  std::wstring upper = ext.empty() ? L"" : ext.substr(1);
+  for (wchar_t& ch : upper) ch = static_cast<wchar_t>(::towupper(ch));
+  const std::wstring type = upper + L" file (*" + ext + L")";
+  const std::wstring pattern = L"*" + ext;
+  const COMDLG_FILTERSPEC types[] = {{type.c_str(), pattern.c_str()}, {L"All files (*.*)", L"*.*"}};
+  if (ext.empty()) {
+    dialog->SetFileTypes(1, &types[1]);
+  } else {
+    dialog->SetFileTypes(2, types);
+    dialog->SetDefaultExtension(ext.c_str() + 1);
+  }
+  Microsoft::WRL::ComPtr<IShellItem> folder;
+  if (SUCCEEDED(::SHCreateItemFromParsingName(suggested.parent_path().c_str(), nullptr, IID_PPV_ARGS(&folder)))) {
+    dialog->SetFolder(folder.Get());
+  }
+  dialog->SetFileName(suggested.filename().c_str());
+  dialog->SetTitle(L"Save as");
+  if (FAILED(dialog->Show(owner))) return std::nullopt;  // cancelled
+  Microsoft::WRL::ComPtr<IShellItem> item;
+  PWSTR result = nullptr;
+  if (FAILED(dialog->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &result))) {
+    return std::nullopt;
+  }
+  std::filesystem::path path = result;
+  ::CoTaskMemFree(result);
+  return path;
+}
+
+}  // namespace
+
+bool DownloadManager::OnBeforeDownload(Profile* profile, CefRefPtr<CefDownloadItem> item,
+                                       const CefString& suggested_name,
+                                       CefRefPtr<CefBeforeDownloadCallback> callback, bool save_as,
+                                       HWND owner) {
+  Application* app = Application::Get();
+  const bool ask = save_as || app->store().GetPref(Store::kGlobalScope, L"download_ask") == L"1";
+  const std::filesystem::path suggested = UniquePath(Directory(), suggested_name.ToWString());
+  Pending pending;
+  pending.cef_id = item->GetId();
+  pending.url = item->GetURL().ToWString();
+  pending.mime_type = item->GetMimeType().ToWString();
+  pending.total_bytes = item->GetTotalBytes();
+  if (!ask) {
+    Start(profile, pending, suggested, /*chosen=*/false, callback);
+    return true;
+  }
+  // Asked outside this CEF callback (the dialog runs its own loop). Dropping
+  // |callback| without continuing cancels the download.
+  const int64_t profile_id = profile ? profile->id() : 0;
+  CefPostTask(TID_UI, base::BindOnce(
+                          [](int64_t profile_id, Pending pending, std::filesystem::path suggested, HWND owner,
+                             CefRefPtr<CefBeforeDownloadCallback> callback) {
+                            Application* app = Application::Get();
+                            if (!app) return;
+                            const std::optional<std::filesystem::path> path =
+                                ChooseSavePath(::IsWindow(owner) ? owner : nullptr, suggested);
+                            Profile* profile = app->FindAnyProfile(profile_id);  // may have gone meanwhile
+                            if (!path || !profile) {
+                              ORBIT_LOG_INFO("download %u: save as cancelled", pending.cef_id);
+                              return;
+                            }
+                            app->downloads().Start(profile, pending, *path, /*chosen=*/true, callback);
+                          },
+                          profile_id, pending, suggested, owner, callback));
+  return false;
+}
+
+void DownloadManager::Start(Profile* profile, const Pending& pending, const std::filesystem::path& path,
+                            bool chosen, CefRefPtr<CefBeforeDownloadCallback> callback) {
+  Application* app = Application::Get();
   Live live;
   live.profile = profile;
+  live.chosen = chosen;
+  live.partial = path.wstring() + kPartialSuffix;
   live.item.is_private = !profile || profile->is_private();
   DownloadRecord& rec = live.item.record;
   rec.profile_id = profile ? profile->id() : 0;
-  rec.url = item->GetURL().ToWString();
-  rec.path = target.wstring();
-  rec.mime_type = item->GetMimeType().ToWString();
-  rec.total_bytes = item->GetTotalBytes();
+  rec.url = pending.url;
+  rec.path = path.wstring();
+  rec.mime_type = pending.mime_type;
+  rec.total_bytes = pending.total_bytes;
   rec.started_at = NowUnixMillis();
   if (live.item.is_private) {
     rec.id = next_session_id_--;
   } else {
     rec.id = app->store().InsertDownload(rec);
   }
-  live_[item->GetId()] = std::move(live);
-  callback->Continue(target.wstring(), ask);
-  ORBIT_LOG_INFO("download %u started", item->GetId());
+  const std::wstring partial = live.partial.wstring();
+  live_[pending.cef_id] = std::move(live);
+  callback->Continue(partial, /*show_dialog=*/false);
+  ORBIT_LOG_INFO("download %u started", pending.cef_id);
   NotifyWindows(profile);
+}
+
+bool DownloadManager::MovePartialToFinal(Live& live) {
+  // The finished file takes its name. A file that took that name meanwhile is
+  // kept, unless the user picked this path and agreed to replace it.
+  std::filesystem::path target = live.item.record.path;
+  std::error_code ec;
+  if (!live.chosen && std::filesystem::exists(target, ec)) {
+    target = UniquePath(target.parent_path(), target.filename().wstring());
+  }
+  const DWORD flags = live.chosen ? MOVEFILE_REPLACE_EXISTING : 0;
+  for (int attempt = 0; attempt < 5; ++attempt) {
+    // A scanner may still hold the file for a moment after it is written.
+    if (::MoveFileExW(live.partial.c_str(), target.c_str(), flags)) {
+      live.item.record.path = target.wstring();
+      return true;
+    }
+    ::Sleep(40);
+  }
+  ORBIT_LOG_WARNING("download: could not rename the finished file (%lu); it keeps its partial name",
+                    ::GetLastError());
+  live.item.record.path = live.partial.wstring();
+  return false;
 }
 
 void DownloadManager::OnDownloadUpdated(CefRefPtr<CefDownloadItem> item,
@@ -93,8 +202,8 @@ void DownloadManager::OnDownloadUpdated(CefRefPtr<CefDownloadItem> item,
   live.control = callback;
   DownloadRecord& rec = live.item.record;
   const DownloadState before = rec.state;
-  const std::wstring full_path = item->GetFullPath().ToWString();
-  if (!full_path.empty()) rec.path = full_path;  // the user may have chosen another path
+  // Chromium writes to the partial path; the record keeps the final one.
+  if (const std::wstring full_path = item->GetFullPath().ToWString(); !full_path.empty()) live.partial = full_path;
   rec.received_bytes = item->GetReceivedBytes();
   rec.total_bytes = item->GetTotalBytes();
   live.item.speed = item->GetCurrentSpeed();
@@ -117,6 +226,7 @@ void DownloadManager::OnDownloadUpdated(CefRefPtr<CefDownloadItem> item,
   const ULONGLONG now = ::GetTickCount64();
   if (finished) {
     rec.ended_at = NowUnixMillis();
+    if (rec.state == DownloadState::kComplete) MovePartialToFinal(live);
     OnFinished(live);
     Persist(live);
     live_.erase(it);  // the stored record is now authoritative
@@ -279,10 +389,12 @@ bool DownloadManager::Open(Profile* profile, int64_t id, HWND owner) {
 bool DownloadManager::ShowInFolder(Profile* profile, int64_t id) {
   const std::optional<Item> item = FindItem(profile, id);
   if (!item) return false;
-  PIDLIST_ABSOLUTE pidl = ::ILCreateFromPathW(item->record.path.c_str());
+  const Live* live = FindLive(profile, id);
+  const std::wstring shown = live ? live->partial.wstring() : item->record.path;  // unfinished: its partial file
+  PIDLIST_ABSOLUTE pidl = ::ILCreateFromPathW(shown.c_str());
   if (!pidl) {
     // File gone: open the folder instead.
-    const std::wstring dir = std::filesystem::path(item->record.path).parent_path().wstring();
+    const std::wstring dir = std::filesystem::path(shown).parent_path().wstring();
     return reinterpret_cast<INT_PTR>(::ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr,
                                                      nullptr, SW_SHOWNORMAL)) > 32;
   }

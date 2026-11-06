@@ -57,6 +57,8 @@ body{-webkit-user-select:none;user-select:none;font-size:13px}
 .tdot:not(.active){opacity:.4}
 #handle{position:absolute;width:6px;height:10px;border-radius:2px;background:color-mix(in srgb,var(--text) 70%,transparent);cursor:pointer;z-index:2;transition:height .1s}
 #handle:hover{height:14px}
+/* Windows' "Animation effects" off, as the chrome's own animations (ui::AnimMs) */
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 <div id="panel">
   <div id="pad" role="application" aria-label="Theme colors">

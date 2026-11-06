@@ -58,8 +58,12 @@ class BrowserWindow {
   BrowserWindow(const BrowserWindow&) = delete;
   BrowserWindow& operator=(const BrowserWindow&) = delete;
 
+  // Creates the window hidden; Show() reveals it once it has its space, so its
+  // first frame is not an empty sidebar on the default colour.
   bool Create(const WindowRecord* placement);
+  void Show();
   void Destroy();
+  int paints_without_space() const { return paints_without_space_; }  // tests
 
   HWND hwnd() const { return hwnd_; }
   Profile* profile() const { return profile_; }
@@ -369,6 +373,7 @@ class BrowserWindow {
   const std::vector<OmniboxRow>& url_results() const { return results_; }
   int first_visible_url_result() const { return results_first_; }
   std::wstring address_text() const;  // what the address field shows (tests)
+  bool spinner_timer_running() const { return spinner_running_; }  // tests
   void MoveUrlSelectionForTesting(int delta) { MoveUrlResultSelection(delta); }
   // Search suggestions for |text| as if the engine had answered (tests).
   void SetSearchSuggestionsForTesting(const std::wstring& text, std::vector<std::wstring> list);
@@ -700,6 +705,13 @@ class BrowserWindow {
   };
   void ShowFloatingUrlBar(bool new_tab, bool select_all = true,
                           PopupAnchor anchor = PopupAnchor::kCentered);
+  // Asked for before the window was shown; Show() opens it.
+  struct PendingUrlBar {
+    bool new_tab;
+    bool select_all;
+    PopupAnchor anchor;
+  };
+  std::optional<PendingUrlBar> url_bar_on_show_;
   void UpdateUrlResults();
   void MoveUrlResultSelection(int delta);
   void ActivateUrlResult(int index);
@@ -714,6 +726,8 @@ class BrowserWindow {
   void NotifyAccessibleFocus();
 
   HWND hwnd_ = nullptr;
+  int show_cmd_ = SW_SHOWNORMAL;   // Create's placement, applied by Show()
+  int paints_without_space_ = 0;   // frames drawn before ShowWorkspace (tests)
   std::unique_ptr<AccessibilityHost> accessibility_;
   HWND address_ = nullptr;
   HWND address_label_ = nullptr;  // names the EDIT for accessibility
@@ -810,6 +824,11 @@ class BrowserWindow {
   std::wstring suggest_text_;  // the input the suggestions below are for
   std::vector<std::wstring> suggest_results_;
   std::wstring suggest_pending_;
+  // The history ranking while the bar is open (one query, then each key is
+  // matched in memory); rebuilt when history changes, dropped on hide.
+  std::optional<FrecentHistory> history_rank_;
+  int64_t history_rank_profile_ = 0;
+  uint64_t history_rank_version_ = 0;
   void RequestSearchSuggestions(const std::wstring& text);
   void FillInputFromSelection();
   void ScrollUrlResults(int rows);
@@ -847,6 +866,15 @@ class BrowserWindow {
   int space_step_ = 0;
   // Split view: tabs whose hosts are on screen, and a divider drag.
   std::vector<Tab*> content_shown_;
+  // A tab switch shows the next page's host under the one on screen until
+  // it has had time to paint: a host shown again shows a blank surface
+  // (Chromium's #3C3C3C in the dark) until its compositor's next frame.
+  Tab* switching_to_ = nullptr;
+  bool commit_switch_ = false;  // ShowContent: no cover, the switch lands now
+  // The tab host on top that covers |rect| (client px) while |next| comes up
+  // under it: the page shown before, or one that is closing. Null when
+  // |next| shows at once.
+  HWND SwitchCover(Tab* next, const RECT& rect) const;
   bool painting_split_segment_ = false;
   struct SplitDrag {
     int64_t split_id = 0;

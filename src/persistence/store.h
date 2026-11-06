@@ -221,8 +221,15 @@ class Store {
   // The address bar's history rows: one per URL, best first by a Firefox-like
   // frecency (each visit weighs 100 / 70 / 50 / 30 / 10 by age: 4, 14, 31,
   // 90 days, older), newest on ties. The title is the latest visit's.
+  // LoadHistoryFrecent ranks every URL (one query; the address bar keeps it
+  // for as long as it is open, see FrecentHistory); QueryHistoryFrecent is
+  // that list filtered by |query| (URL or latest title, ASCII case-insensitive).
+  std::vector<HistoryRecord> LoadHistoryFrecent(int64_t profile_id, int64_t now_ms);
   std::vector<HistoryRecord> QueryHistoryFrecent(int64_t profile_id, const std::wstring& query,
                                                  int64_t now_ms, int limit);
+  // Changes with every history write (visits, titles, deletions), so a kept
+  // ranking knows when it is stale.
+  uint64_t history_version() const { return history_version_; }
   bool DeleteVisit(int64_t profile_id, int64_t id);
   // Deletes visits with from <= visit_time < to (to == 0 means "until now").
   int DeleteHistoryRange(int64_t profile_id, int64_t from, int64_t to);
@@ -279,6 +286,23 @@ class Store {
 
  private:
   Database& db_;
+  uint64_t history_version_ = 0;
+};
+
+// The address bar's history ranking, kept while the bar is open: matching a
+// keystroke scans this list instead of every visit in the database (that
+// query grew with history, ~50-70 ms per key at 60,000 visits).
+class FrecentHistory {
+ public:
+  explicit FrecentHistory(std::vector<HistoryRecord> ranked);
+  // The first |limit| rows (best first) whose URL or title contains |query|
+  // (ASCII case-insensitive); all rows when |query| is empty.
+  std::vector<HistoryRecord> Match(const std::wstring& query, int limit) const;
+  size_t size() const { return rows_.size(); }
+
+ private:
+  std::vector<HistoryRecord> rows_;
+  std::vector<std::wstring> url_lower_, title_lower_;
 };
 
 int64_t NowUnixMillis();

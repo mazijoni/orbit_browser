@@ -229,6 +229,11 @@ void AddBasicSuite(Runner& r) {
   r.Add("window exists", [s, app] {
     s->window = FirstWindowOf(app->profiles().front().get());
   }, [s] { return s->window != nullptr && s->window->active_tab() != nullptr; });
+  r.Add("its first frame already showed its space", [s, &r] {
+    r.Check(::IsWindowVisible(s->window->hwnd()) != FALSE, "the window is on screen");
+    r.Check(s->window->paints_without_space() == 0,
+            "no frame was drawn before the space (" + std::to_string(s->window->paints_without_space()) + ")");
+  });
 
   r.Add("navigate to page A", [s] {
     s->tab = s->window->active_tab();
@@ -251,6 +256,14 @@ void AddBasicSuite(Runner& r) {
   r.Add("address bar state follows URL", [s, &r] {
     r.Check(s->tab->url().find(L"t=Bravo") != std::wstring::npos, "tab URL is page B");
     r.Check(s->tab->security() == SecurityLevel::kInternal, "orbit:// shows internal identity");
+    // Navigations the address bar did not start (back, forward, links,
+    // redirects) still reach the window's chrome.
+    r.Check(s->window->address_text().find(L"t=Bravo") != std::wstring::npos,
+            "the address field shows page B after back / forward");
+    wchar_t title[256] = {};
+    ::GetWindowTextW(s->window->hwnd(), title, 256);
+    r.Check(std::wstring(title).starts_with(L"Bravo"), "the window title is page B's");
+    r.Check(!s->window->spinner_timer_running(), "the loading spinner's timer stops once the page has loaded");
   });
 
   // A tab that was closing when this step began leaves the list a moment later
@@ -276,6 +289,33 @@ void AddBasicSuite(Runner& r) {
     }
     return true;
   });
+
+  // Each new tab was selected while it loaded, which starts the spinner's
+  // 60 ms repaint timer; the end of the load must stop it.
+  r.Add("the new tabs finish loading", nullptr, [s] {
+    for (const auto& t : s->window->workspace()->tabs()) {
+      if (t->loading()) return false;
+    }
+    return true;
+  });
+  r.Add("... and the spinner's timer stops", [s, &r] {
+    r.Check(!s->window->spinner_timer_running(), "no repaint timer runs once no tab is loading");
+  });
+  // A tab selected before its browser exists (the welcome page, a link from
+  // another application) while the address field has the focus: the field
+  // lets go, or it keeps the keyboard and refuses the page's focus for good.
+  r.Add("a new tab opens while the address field has the focus", [s] {
+    s->tabs_before = s->window->workspace()->tabs().size();
+    s->window->FocusAddressBarForTest();
+    s->window->OpenTab(TestUrl(L"t=Focus"), true);
+  }, [s] {
+    Tab* t = s->window->active_tab();
+    return t && t->record().title == L"Focus" && !t->loading();
+  });
+  r.Add("... the address field no longer has the keyboard", [s, &r] {
+    r.Check(!s->window->AddressBarHasFocus(), "the address field let go of the focus");
+    s->window->active_tab()->RequestClose();  // the later steps count the tabs
+  }, [s] { return s->window->workspace()->tabs().size() == s->tabs_before; });
 
   r.Add("every tab maps to a distinct Chromium browser", [s, &r, app] {
     std::vector<int> ids;
@@ -403,6 +443,21 @@ void AddBasicSuite(Runner& r) {
     const std::wstring a1 = notif.substr(0, slash), a2 = slash == std::wstring::npos ? L"" : notif.substr(slash + 1);
     r.Check((a1 == L"default" && a2 == L"prompt") || a1 == a2, "notification permission is consistent (" + N(notif) + ")");
     return true;
+  });
+  // The loading indicator follows a load the tab did not start loading in
+  // ActivateTab: it runs while the page loads and stops after.
+  auto spinner_seen = std::make_shared<bool>(false);
+  r.Add("a slow page loads in the active tab", [s, bot_server, spinner_seen] {
+    *spinner_seen = false;
+    s->window->active_tab()->Navigate(bot_server->Url(L"/slow"));
+  }, [s, spinner_seen] {
+    Tab* t = s->window->active_tab();
+    if (t->loading() && s->window->spinner_timer_running()) *spinner_seen = true;
+    return t->record().title == L"Slow" && !t->loading();
+  });
+  r.Add("... the spinner ran while it loaded, and stopped after", [s, spinner_seen, &r] {
+    r.Check(*spinner_seen, "the spinner's timer runs while the active tab loads");
+    r.Check(!s->window->spinner_timer_running(), "and stops when the load ends");
   });
   auto media_server = std::make_shared<TestHttpServer>();
   r.Add("media: an H.264 clip plays", [s, media_server, &r] {
@@ -694,6 +749,122 @@ void AddServicesSuite(Runner& r) {
     return true;
   });
 
+  // The page menu's "Save ... as" items (Chromium's command ids, which
+  // BrowserClient relies on): over a link, an image and an audio player.
+  auto menus = std::make_shared<std::vector<std::vector<int>>>();
+  auto right_click = [](Tab* t, int y) {
+    CefMouseEvent e;
+    e.x = 100;
+    e.y = y;
+    e.modifiers = 0;
+    t->browser()->GetHost()->SendMouseClickEvent(e, MBT_RIGHT, false, 1);
+    t->browser()->GetHost()->SendMouseClickEvent(e, MBT_RIGHT, true, 1);
+  };
+  r.Add("page menus offer Save link / image / audio as", [s, server, menus] {
+    menus->clear();
+    BrowserClient::test_menu_observer = [menus](CefRefPtr<CefMenuModel> model, CefRefPtr<CefContextMenuParams>) {
+      std::vector<int> ids;
+      for (size_t i = 0; i < model->GetCount(); ++i) ids.push_back(model->GetCommandIdAt(i));
+      menus->push_back(ids);
+      return 0;
+    };
+    s->window->active_tab()->Navigate(server->Url(L"/saveables"));
+  }, [s, menus, right_click, &r] {
+    Tab* t = s->window->active_tab();
+    if (t->record().title != L"saveables" || t->loading()) return false;
+    static const int ys[] = {60, 180, 255};  // the link, the image, the audio player
+    if (menus->size() < 3) {
+      right_click(t, ys[menus->size()]);
+      return false;
+    }
+    BrowserClient::test_menu_observer = nullptr;
+    auto has = [](const std::vector<int>& ids, int id) { return std::find(ids.begin(), ids.end(), id) != ids.end(); };
+    r.Check(has((*menus)[0], 50103), "over a link: Save link as (50103)");
+    r.Check(has((*menus)[1], 50120), "over an image: Save image as (50120)");
+    r.Check(has((*menus)[2], 50131), "over audio: Save audio as (50131)");
+    return true;
+  }, 10000);
+
+  // "Save link as" asks where to save, and the file goes there.
+  struct SaveAs {
+    std::filesystem::path dir;
+    std::optional<std::filesystem::path> suggested;  // what the dialog was opened on
+    size_t downloads = 0;
+    ULONGLONG t0 = 0;
+    bool saw_partial = false;
+  };
+  auto sa = std::make_shared<SaveAs>();
+  r.Add("Save link as asks where to save", [s, sa, app, right_click] {
+    sa->dir = app->user_data_dir() / L"saveas-test";
+    std::filesystem::create_directories(sa->dir);
+    sa->suggested.reset();
+    sa->downloads = app->store().LoadDownloads(app->profiles().front()->id(), 500).size();
+    DownloadManager::test_choose_path = [sa](const std::filesystem::path& suggested) {
+      sa->suggested = suggested;
+      return std::optional<std::filesystem::path>(sa->dir / L"chosen.bin");
+    };
+    BrowserClient::test_menu_observer = [](CefRefPtr<CefMenuModel>, CefRefPtr<CefContextMenuParams>) { return 50103; };
+    right_click(s->window->active_tab(), 60);
+  }, [s, sa, app, &r] {
+    auto list = app->store().LoadDownloads(app->profiles().front()->id(), 500);
+    if (list.size() != sa->downloads + 1 || list.front().state != DownloadState::kComplete) return false;
+    BrowserClient::test_menu_observer = nullptr;
+    DownloadManager::test_choose_path = nullptr;
+    std::error_code ec;
+    r.Check(sa->suggested.has_value(), "the Save dialog was shown");
+    r.Check(sa->suggested && sa->suggested->parent_path() == s->dl_dir, "it opened on the download folder");
+    r.Check(std::filesystem::path(list.front().path) == sa->dir / L"chosen.bin", "the download records the chosen path");
+    r.Check(std::filesystem::file_size(sa->dir / L"chosen.bin", ec) == TestHttpServer::kFileSize,
+            "the file was saved where the user chose");
+    r.Check(!std::filesystem::exists(sa->dir / L"chosen.bin.crdownload", ec), "no partial file is left");
+    return true;
+  });
+  r.Add("Save image as, cancelled, saves nothing", [s, sa, app, right_click] {
+    sa->suggested.reset();
+    sa->downloads = app->store().LoadDownloads(app->profiles().front()->id(), 500).size();
+    DownloadManager::test_choose_path = [sa](const std::filesystem::path& suggested) {
+      sa->suggested = suggested;
+      return std::optional<std::filesystem::path>();  // Cancel
+    };
+    BrowserClient::test_menu_observer = [](CefRefPtr<CefMenuModel>, CefRefPtr<CefContextMenuParams>) { return 50120; };
+    right_click(s->window->active_tab(), 180);
+    sa->t0 = ::GetTickCount64();
+  }, [s, sa, app, &r] {
+    if (!sa->suggested || ::GetTickCount64() - sa->t0 < 1500) return false;
+    BrowserClient::test_menu_observer = nullptr;
+    DownloadManager::test_choose_path = nullptr;
+    r.Check(sa->suggested->extension() == L".png", "the dialog offered the image (" + N(sa->suggested->filename()) + ")");
+    r.Check(app->store().LoadDownloads(app->profiles().front()->id(), 500).size() == sa->downloads,
+            "no download was recorded");
+    r.Check(app->downloads().ActiveCount(s->window->profile()) == 0, "nothing is downloading");
+    return true;
+  }, 10000);
+  // An ordinary download (no menu) still saves without asking.
+  r.Add("an unfinished download is a .crdownload file", [s, sa, app, server] {
+    sa->saw_partial = false;
+    sa->downloads = app->store().LoadDownloads(app->profiles().front()->id(), 500).size();
+    s->window->active_tab()->Navigate(server->Url(L"/slowfile"));
+  }, [s, sa, app, &r] {
+    std::error_code ec;
+    const std::filesystem::path final_path = s->dl_dir / L"slow.bin";
+    const std::filesystem::path partial = s->dl_dir / L"slow.bin.crdownload";
+    for (const auto& item : app->downloads().List(s->window->profile())) {  // live progress
+      if (item.record.state == DownloadState::kInProgress && item.record.received_bytes > 0 &&
+          std::filesystem::exists(partial, ec) && !std::filesystem::exists(final_path, ec)) {
+        sa->saw_partial = true;
+      }
+    }
+    auto list = app->store().LoadDownloads(app->profiles().front()->id(), 500);
+    if (list.size() != sa->downloads + 1 || list.front().state != DownloadState::kComplete) return false;
+    r.Check(sa->saw_partial, "while it downloads only slow.bin.crdownload exists");
+    r.Check(std::filesystem::file_size(final_path, ec) == TestHttpServer::kFileSize, "finished, it is slow.bin");
+    r.Check(!std::filesystem::exists(partial, ec), "and the partial file is gone");
+    r.Check(std::filesystem::path(list.front().path) == final_path, "the download records the final name");
+    const std::wstring zone = final_path.wstring() + L":Zone.Identifier";
+    r.Check(::GetFileAttributesW(zone.c_str()) != INVALID_FILE_ATTRIBUTES, "it keeps its Mark-of-the-Web");
+    return true;
+  }, 20000);
+
   r.Add("web page cannot read or call orbit:// APIs", [s, server] {
     s->window->active_tab()->Navigate(server->Url(L"/attack"));
   }, [s, app, &r] {
@@ -778,6 +949,73 @@ void AddMemorySuite(Runner& r) {
           (bg == L"VIS:hidden" ? " (throttling active)" : " (known limitation: not throttled)"));
     return true;
   });
+
+  // Opening and closing tabs over and over must give back what each tab took:
+  // its host and Chromium's windows (USER objects), GDI objects, handles.
+  // Round 0 warms up (first-use caches); the rest are compared with it.
+  struct Churn {
+    std::vector<Tab*> tabs;
+    size_t count = 0;            // the space's tabs before a round
+    ULONGLONG settled_since = 0;
+    DWORD user = 0, gdi = 0, handles = 0;
+  };
+  auto churn = std::make_shared<Churn>();
+  auto measure = [](DWORD& user, DWORD& gdi, DWORD& handles) {
+    user = ::GetGuiResources(::GetCurrentProcess(), GR_USEROBJECTS);
+    gdi = ::GetGuiResources(::GetCurrentProcess(), GR_GDIOBJECTS);
+    ::GetProcessHandleCount(::GetCurrentProcess(), &handles);
+  };
+  constexpr int kChurnRounds = 4;
+  for (int round = 0; round < kChurnRounds; ++round) {
+    const std::string n = std::to_string(round);
+    r.Add("tab churn " + n + ": open 5 tabs", [s, server, churn, round] {
+      churn->count = s->window->workspace()->tabs().size();
+      churn->tabs.clear();
+      for (int i = 0; i < 5; ++i) {
+        const std::wstring url = server->Url(L"/page?t=Churn" + std::to_wstring(round) + L"_" + std::to_wstring(i));
+        churn->tabs.push_back(s->window->OpenTab(url, i == 4));
+      }
+    }, [churn] {
+      for (Tab* t : churn->tabs) {
+        if (!t->has_browser() || t->loading() || !t->record().title.starts_with(L"Churn")) return false;
+      }
+      return true;
+    });
+    r.Add("tab churn " + n + ": close them", [churn] {
+      churn->settled_since = 0;
+      for (Tab* t : churn->tabs) t->RequestClose();
+      churn->tabs.clear();
+    }, [s, churn] {
+      // Gone from the space, every host destroyed, then a short settle.
+      if (s->window->workspace()->tabs().size() != churn->count || Tab::PendingHostDestroys() != 0) {
+        churn->settled_since = 0;
+        return false;
+      }
+      if (!churn->settled_since) churn->settled_since = ::GetTickCount64();
+      return ::GetTickCount64() - churn->settled_since > 500;
+    });
+    r.Add("tab churn " + n + ": resources", [churn, measure, round, &r] {
+      DWORD user = 0, gdi = 0, handles = 0;
+      measure(user, gdi, handles);
+      if (round == 0) {
+        churn->user = user;
+        churn->gdi = gdi;
+        churn->handles = handles;
+        r.Log("  info baseline after warm-up: USER " + std::to_string(user) + ", GDI " + std::to_string(gdi) +
+              ", handles " + std::to_string(handles));
+        return;
+      }
+      const long du = static_cast<long>(user) - static_cast<long>(churn->user);
+      const long dg = static_cast<long>(gdi) - static_cast<long>(churn->gdi);
+      const long dh = static_cast<long>(handles) - static_cast<long>(churn->handles);
+      r.Log("  info after " + std::to_string(round * 5) + " more tabs: USER " + std::to_string(du) + ", GDI " +
+            std::to_string(dg) + ", handles " + std::to_string(dh) + " vs. the baseline");
+      // A leak grows with every round (each tab has a host and several
+      // Chromium windows); a few objects of slack absorb lazy caches.
+      r.Check(du <= 6, "USER objects come back after closing tabs (" + std::to_string(du) + ")");
+      r.Check(dg <= 6, "GDI objects come back after closing tabs (" + std::to_string(dg) + ")");
+    });
+  }
 
   r.Add("process metrics cover the browser tree", nullptr, [&r] {
     const auto tree = CollectProcessTree(::GetCurrentProcessId());
@@ -3443,6 +3681,7 @@ void AddZenSuite(Runner& r) {
     Tab* other = nullptr;
     size_t windows = 0;
     TestHttpServer server;
+    RECT placed{};  // the window's place before the hover test
   };
   auto pp = std::make_shared<Pop>();
   r.Add("popup: window.open with features becomes a glance, not a window", [s, pp, app, &r] {
@@ -3687,7 +3926,24 @@ void AddZenSuite(Runner& r) {
   });
   // Chromium's link-status bubble goes with its page: switching tabs while it
   // shows a link must not leave it on screen.
-  r.Add("status bubble: hovering a link shows its address", [s, pp] {
+  r.Add("status bubble: hovering a link shows its address", [s, pp, &r] {
+    // The hover is synthesized, but Windows still sends the page the real
+    // pointer's moves, which win while it rests over the window (someone
+    // using the machine meanwhile). The window moves to the half of its
+    // monitor the pointer is not on, and back afterwards.
+    ::GetWindowRect(s->window->hwnd(), &pp->placed);
+    POINT cursor;
+    ::GetCursorPos(&cursor);
+    if (::PtInRect(&pp->placed, cursor)) {
+      MONITORINFO mi{sizeof(mi)};
+      ::GetMonitorInfoW(::MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &mi);
+      const RECT& a = mi.rcWork;
+      const int half = (a.right - a.left) / 2;
+      const int left = cursor.x < a.left + half ? a.left + half : a.left;
+      ::SetWindowPos(s->window->hwnd(), nullptr, left, a.top, half, a.bottom - a.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+      r.Log("  info the pointer rested over the window: moved it away");
+    }
     pp->opener = s->window->OpenTab(pp->server.Url(L"/popupbtn"), true);
   }, [s, pp] {
     if (pp->opener->loading() || !pp->opener->browser()) return false;
@@ -3707,6 +3963,9 @@ void AddZenSuite(Runner& r) {
     if (VisibleStatusBubbles(s->window->hwnd()) > 0) {
       s->window->CloseTabShortcut(pp->other);
       s->window->CloseTabShortcut(pp->opener);
+      const RECT& w = pp->placed;
+      ::SetWindowPos(s->window->hwnd(), nullptr, w.left, w.top, w.right - w.left, w.bottom - w.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
       return true;
     }
     static int n = 0;
@@ -4260,6 +4519,18 @@ class WhiteSampler {
   double peak_percent() const { return peak_percent_; }
   int white_ms() const { return white_ms_; }
   int frames() const { return frames_; }
+  // Also measures, inside |area| (screen pixels), the share of pixels further
+  // than |tolerance| from |expected| in some channel: any flash in a dark
+  // window (black, the host's fill, the backdrop, another page), not only white.
+  // Call before Start.
+  void Expect(const RECT& area, COLORREF expected, int tolerance) {
+    expect_ = true;
+    area_ = area;
+    expected_ = expected;
+    tolerance_ = tolerance;
+  }
+  double foreign_peak() const { return foreign_peak_; }
+  int foreign_ms() const { return foreign_ms_; }
   void SavePeak(const std::filesystem::path& path) const {
     if (peak_.empty()) return;
     BITMAPINFOHEADER info = Header(peak_w_, peak_h_);
@@ -4310,10 +4581,35 @@ class WhiteSampler {
       const double percent = 100.0 * static_cast<double>(white) / static_cast<double>(count);
       const ULONGLONG now = ::GetTickCount64();
       if (percent >= 5.0) white_ms_ += static_cast<int>(now - last);
+      double foreign = 0;
+      if (expect_) {
+        const int left = std::max(0L, area_.left - rc.left), right = std::min<long>(w, area_.right - rc.left);
+        const int top = std::max(0L, area_.top - rc.top), bottom = std::min<long>(h, area_.bottom - rc.top);
+        size_t off = 0, total = 0;
+        auto distant = [this](uint32_t v, int shift, int want) {
+          return std::abs(static_cast<int>((v >> shift) & 0xFF) - want) > tolerance_;
+        };
+        for (int y = top; y < bottom; ++y) {
+          for (int x = left; x < right; ++x) {
+            const uint32_t v = px[static_cast<size_t>(y) * w + x];  // BGRA
+            ++total;
+            if (distant(v, 0, GetBValue(expected_)) || distant(v, 8, GetGValue(expected_)) ||
+                distant(v, 16, GetRValue(expected_))) {
+              ++off;
+            }
+          }
+        }
+        foreign = total ? 100.0 * static_cast<double>(off) / static_cast<double>(total) : 0;
+        if (foreign >= 1.0) foreign_ms_ += static_cast<int>(now - last);
+        foreign_peak_ = std::max(foreign_peak_, foreign);
+      }
       last = now;
       ++frames_;
-      if (percent > peak_percent_) {
-        peak_percent_ = percent;
+      // The frame kept is the worst one by what this run measures.
+      const double worst = expect_ ? foreign : percent;
+      if (percent > peak_percent_) peak_percent_ = percent;
+      if (worst > peak_worst_ || peak_.empty()) {
+        peak_worst_ = worst;
         peak_.assign(px, px + count);
         peak_w_ = w;
         peak_h_ = h;
@@ -4329,8 +4625,15 @@ class WhiteSampler {
   std::atomic<bool> stop_{false};
   std::thread worker_;
   double peak_percent_ = 0;
+  double peak_worst_ = -1;
   int white_ms_ = 0;
   int frames_ = 0;
+  bool expect_ = false;
+  RECT area_{};
+  COLORREF expected_ = 0;
+  int tolerance_ = 0;
+  double foreign_peak_ = 0;
+  int foreign_ms_ = 0;
   std::vector<uint32_t> peak_;
   int peak_w_ = 0, peak_h_ = 0;
 };
@@ -4396,6 +4699,150 @@ void AddFlashSuite(Runner& r) {
   measure("library-reclose", [s] { s->window->CloseLibrary(); });
   measure("compact-on", [s] { s->window->SetCompactMode(true); });
   measure("compact-off", [s] { s->window->SetCompactMode(false); });
+
+  // Rapid interactions over pages of one colour (/dark: #101014). Anything
+  // else in the page area, in any frame, is a flicker: black, the host's
+  // fill, the backdrop, a blank surface. The area leaves out the card's
+  // corners and the page's line of text.
+  auto page_area = [](BrowserWindow* w) {
+    RECT c = w->ContentRectPx();
+    ::MapWindowPoints(w->hwnd(), nullptr, reinterpret_cast<POINT*>(&c), 2);
+    return RECT{c.left + 24, c.top + 40, c.right - 24, c.bottom - 24};
+  };
+  // |strict| false: a page that has not painted yet (a new tab) shows the
+  // card's colour like any browser shows its own; that is recorded, and only
+  // white counts against it.
+  auto steady = [&r, s, app, page_area](const std::string& name, std::function<void(int)> step, int count,
+                                         int every_ms, bool strict = true) {
+    r.Add("settle before " + name, [s] { s->t0 = ::GetTickCount64(); },
+          [s] { return ::GetTickCount64() - s->t0 > 1000; });
+    r.Add(name, [s, step, count, every_ms, page_area] {
+      s->sampler = std::make_unique<WhiteSampler>();
+      s->sampler->Expect(page_area(s->window), RGB(0x10, 0x10, 0x14), 8);
+      s->sampler->Start(s->window->hwnd());
+      ::Sleep(30);
+      s->t0 = ::GetTickCount64();
+      for (int i = 0; i < count; ++i) {
+        CefPostDelayedTask(TID_UI, base::BindOnce([](std::function<void(int)> f, int n) { f(n); }, step, i),
+                           static_cast<int64_t>(i) * every_ms);
+      }
+    }, [s, app, name, count, every_ms, strict, &r] {
+      if (::GetTickCount64() - s->t0 < static_cast<ULONGLONG>(count * every_ms + 1200)) return false;
+      s->sampler->Stop();
+      s->sampler->SavePeak(app->user_data_dir() / (L"flash-" + FromUtf8(name) + L".bmp"));
+      char line[200];
+      std::snprintf(line, sizeof(line), "%s: peak %.2f%% of the page area not the page, %d ms at 1%%+, %d frames",
+                    name.c_str(), s->sampler->foreign_peak(), s->sampler->foreign_ms(), s->sampler->frames());
+      if (strict) {
+        r.Check(s->sampler->foreign_peak() < 1.0, line);
+      } else {
+        r.Log(std::string("  info ") + line);
+        r.Check(s->sampler->peak_percent() < 5.0, name + ": no white (" + std::to_string(s->sampler->peak_percent()) + "%)");
+      }
+      return true;
+    }, count * every_ms + 8000);
+  };
+  steady("rapid-tab-switch", [s](int i) { s->window->ActivateTab(i % 2 ? s->page : s->other); }, 24, 30);
+  r.Add("... it lands on the last tab chosen", [s, &r] {
+    Tab* shown = s->window->active_tab();
+    Tab* hidden = shown == s->page ? s->other : s->page;
+    r.Check(shown == s->page, "the last switch selected the page");
+    r.Check(shown->host() && ::IsWindowVisible(shown->host()), "its host is on screen");
+    r.Check(hidden->host() && !::IsWindowVisible(hidden->host()), "the other page's host is hidden");
+  });
+  steady("rapid-navigation", [s](int i) {
+    s->window->active_tab()->Navigate(g_server->Url(L"/dark?t=Nav" + std::to_wstring(i)));
+  }, 8, 150);
+  // Live resize: the window grows right and down and back; the page area at
+  // the start size stays covered by the page throughout.
+  auto base = std::make_shared<RECT>();
+  r.Add("remember the window's size", [s, base] { ::GetWindowRect(s->window->hwnd(), base.get()); });
+  steady("window-resize", [s, base](int i) {
+    const int d = 40 * (i % 8 < 4 ? i % 8 : 8 - i % 8);  // 0 40 80 120 160 120 80 40 ...
+    ::SetWindowPos(s->window->hwnd(), nullptr, 0, 0, base->right - base->left + d, base->bottom - base->top + d,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  }, 16, 30);
+  r.Add("back to the start size", [s, base] {
+    ::SetWindowPos(s->window->hwnd(), nullptr, 0, 0, base->right - base->left, base->bottom - base->top,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  });
+
+  // Rapid toggles of animated states: whatever the order, everything ends
+  // where the last call put it, and the page's host sits where the layout says.
+  auto host_placed = [](BrowserWindow* w) {
+    Tab* t = w->active_tab();
+    if (!t || !t->host() || !::IsWindowVisible(t->host())) return false;
+    RECT h;
+    ::GetWindowRect(t->host(), &h);
+    ::MapWindowPoints(nullptr, w->hwnd(), reinterpret_cast<POINT*>(&h), 2);
+    const RECT c = w->ContentRectPx();
+    return ::EqualRect(&h, &c) != FALSE;
+  };
+  r.Add("seven library toggles in a row", [s] {
+    for (int i = 0; i < 7; ++i) s->window->ToggleLibrary();
+    s->t0 = ::GetTickCount64();
+  }, [s, host_placed, &r] {
+    if (::GetTickCount64() - s->t0 < 1200) return false;
+    r.Check(s->window->library_open(), "the library is open (an odd number of toggles)");
+    r.Check(host_placed(s->window), "the page sits where the layout puts it beside the library");
+    s->window->CloseLibrary();
+    s->t0 = ::GetTickCount64();
+    return true;
+  }, 8000);
+  r.Add("... closed again", nullptr, [s, host_placed, &r] {
+    if (::GetTickCount64() - s->t0 < 1200) return false;
+    r.Check(!s->window->library_open(), "the library is closed");
+    r.Check(host_placed(s->window), "the page is back in place");
+    return true;
+  }, 8000);
+  r.Add("nine compact-mode toggles in a row", [s] {
+    for (int i = 0; i < 9; ++i) s->window->SetCompactMode(i % 2 == 0);
+    s->t0 = ::GetTickCount64();
+  }, [s, host_placed, &r] {
+    if (::GetTickCount64() - s->t0 < 1000) return false;
+    r.Check(s->window->compact_mode(), "compact mode is on (the last call)");
+    r.Check(host_placed(s->window), "the page fills the compact layout");
+    s->window->SetCompactMode(false);
+    s->t0 = ::GetTickCount64();
+    return true;
+  }, 8000);
+  r.Add("... and off", nullptr, [s, host_placed, &r] {
+    if (::GetTickCount64() - s->t0 < 1000) return false;
+    r.Check(!s->window->compact_mode(), "compact mode is off");
+    r.Check(host_placed(s->window), "the page is back beside the sidebar");
+    return true;
+  }, 8000);
+  // Display scaling: the window moves to a 150% monitor and back, as Windows
+  // tells it (WM_DPICHANGED with the suggested rect).
+  auto dpi_before = std::make_shared<UINT>(96);
+  auto dpi_change = [s](UINT dpi) {
+    RECT wr;
+    ::GetWindowRect(s->window->hwnd(), &wr);
+    ::SendMessageW(s->window->hwnd(), WM_DPICHANGED, MAKEWPARAM(dpi, dpi), reinterpret_cast<LPARAM>(&wr));
+  };
+  r.Add("the window is told it is on a 150% display", [s, dpi_before, dpi_change] {
+    *dpi_before = ::GetDpiForWindow(s->window->hwnd());
+    dpi_change(*dpi_before * 3 / 2);
+    s->t0 = ::GetTickCount64();
+  }, [s, host_placed, &r] {
+    if (::GetTickCount64() - s->t0 < 800) return false;
+    r.Check(host_placed(s->window), "the page sits where the scaled layout puts it");
+    return true;
+  }, 8000);
+  r.Add("... and back", [s, dpi_before, dpi_change] {
+    dpi_change(*dpi_before);
+    s->t0 = ::GetTickCount64();
+  }, [s, host_placed, &r] {
+    if (::GetTickCount64() - s->t0 < 800) return false;
+    r.Check(host_placed(s->window), "the page sits where the layout puts it");
+    return true;
+  }, 8000);
+  steady("rapid-new-tabs", [s](int i) {
+    s->window->OpenTab(g_server->Url(L"/dark?t=New" + std::to_wstring(i)), true);
+  }, 6, 150, /*strict=*/false);
+  steady("rapid-tab-close", [s](int) {
+    if (Tab* t = s->window->active_tab(); t && t != s->page && t != s->other) t->RequestClose();
+  }, 6, 120);
   // Pages keep their own colours under the dark scheme: white when they paint
   // nothing, and whatever they asked for, however they asked for it.
   auto page_colour = [&r, s](const std::string& name, const std::wstring& path, bool white, int wait_ms = 2000) {
