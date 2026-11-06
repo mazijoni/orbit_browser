@@ -500,6 +500,9 @@ Backup: scratchpad `backup_before_G1` (no change to persisted data in this sessi
   - This CEF build writes a download under its final name. Orbit now has Chromium write `<name>.crdownload` and renames it when it completes (a file that took the name meanwhile is kept, unless the user chose to replace it). "Show in folder" on an unfinished one selects the partial file.
   - Tests (`services`): the menus' command ids, Save link as with the dialog (the file lands where chosen), a cancelled Save image as (nothing saved), and a slow download (`/slowfile`) that exists only as `slow.bin.crdownload` until it finishes. The real dialog was checked once by hand (folder, name, type, Cancel).
   - `self_test.cpp` is compiled with `/bigobj` (it passed the COFF section limit in Debug).
+- 0.2.4 (2026-11-06): **Leaving a video's fullscreen shrank a snapped window.**
+  - Fullscreen saved the window placement and put it back on exit. A snapped window (Win+Left, or dragged to an edge or into a Snap layout) is "arranged": its placement's normal rect is its size before the snap, so it came back at that size. A window that was not maximized now goes back to the rect it had (`GetWindowRect`); a maximized one still uses the placement (it must stay maximized).
+  - Tests (`zen`): a round trip maximized and normal on every monitor (each at its own DPI), a real page made fullscreen in a maximized window and left with Esc and by the page, and a snapped window (snapped with Win+Left, only when the test window is in front). The snapped test failed before the fix (1280x820 back, was 974x1039).
 
 ## Next actions
 

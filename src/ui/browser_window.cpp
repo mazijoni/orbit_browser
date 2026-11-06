@@ -4761,6 +4761,7 @@ void BrowserWindow::SetChromeFullscreen(bool on) {
   if (on) {
     saved_placement_.length = sizeof(saved_placement_);
     ::GetWindowPlacement(hwnd_, &saved_placement_);
+    ::GetWindowRect(hwnd_, &saved_rect_);
     saved_style_ = ::GetWindowLongPtrW(hwnd_, GWL_STYLE);
     ::SetWindowLongPtrW(hwnd_, GWL_STYLE, saved_style_ & ~(WS_CAPTION | WS_THICKFRAME));
     MONITORINFO mi{sizeof(mi)};
@@ -4770,9 +4771,16 @@ void BrowserWindow::SetChromeFullscreen(bool on) {
                    SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
   } else {
     ::SetWindowLongPtrW(hwnd_, GWL_STYLE, saved_style_);
-    ::SetWindowPlacement(hwnd_, &saved_placement_);
-    ::SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
-                   SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+    if (saved_placement_.showCmd == SW_SHOWMAXIMIZED) {
+      ::SetWindowPlacement(hwnd_, &saved_placement_);
+      ::SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+    } else {
+      // Back to the rect it had, not the placement's normal one: a snapped
+      // window's normal rect is its size before the snap (smaller).
+      ::SetWindowPos(hwnd_, nullptr, saved_rect_.left, saved_rect_.top, saved_rect_.right - saved_rect_.left,
+                     saved_rect_.bottom - saved_rect_.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
+    }
   }
   Layout();
 }

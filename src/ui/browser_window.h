@@ -846,6 +846,7 @@ class BrowserWindow {
   Tab* fullscreen_tab_ = nullptr;  // the page in HTML fullscreen
   bool window_fullscreen_ = false;
   WINDOWPLACEMENT saved_placement_{sizeof(WINDOWPLACEMENT)};
+  RECT saved_rect_{};  // the window's rect before fullscreen
   LONG_PTR saved_style_ = 0;
 
   // Spinner animation (only runs while a visible tab is loading).

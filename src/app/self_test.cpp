@@ -3484,8 +3484,189 @@ void AddZenSuite(Runner& r) {
     TestHttpServer server;
   };
   auto fs = std::make_shared<Fs>();
-  r.Add("fullscreen: a page goes fullscreen", [s, fs, &r] {
+  // Leaving page fullscreen gives the window back its size: maximized (it
+  // must not keep the monitor's rect, its frame trimmed inside) and normal.
+  r.Add("fullscreen: the window comes back at its size, maximized or not", [s, &r] {
+    HWND hwnd = s->window->hwnd();
+    Tab* tab = s->window->active_tab();
+    auto round_trip = [&](const char* how) {
+      RECT before{}, client_before{}, during{}, after{}, client_after{};
+      ::GetWindowRect(hwnd, &before);
+      ::GetClientRect(hwnd, &client_before);
+      const bool zoomed = ::IsZoomed(hwnd) != FALSE;
+      s->window->SetContentFullscreen(tab, true);
+      ::GetWindowRect(hwnd, &during);
+      MONITORINFO mi{sizeof(mi)};
+      ::GetMonitorInfoW(::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+      r.Check(::EqualRect(&during, &mi.rcMonitor) != FALSE, std::string(how) + ": fullscreen covers the monitor");
+      s->window->SetContentFullscreen(tab, false);
+      ::GetWindowRect(hwnd, &after);
+      ::GetClientRect(hwnd, &client_after);
+      r.Check((::IsZoomed(hwnd) != FALSE) == zoomed, std::string(how) + ": still " + (zoomed ? "maximized" : "not maximized"));
+      r.Check(::EqualRect(&before, &after) != FALSE,
+              std::string(how) + ": same window rect (" + std::to_string(after.right - after.left) + "x" +
+                  std::to_string(after.bottom - after.top) + ", was " + std::to_string(before.right - before.left) +
+                  "x" + std::to_string(before.bottom - before.top) + ")");
+      r.Check(::EqualRect(&client_before, &client_after) != FALSE, std::string(how) + ": same page area");
+    };
+    // On every monitor (each may have its own DPI).
+    std::vector<RECT> works;
+    ::EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR m, HDC, RECT*, LPARAM p) {
+      MONITORINFO mi{sizeof(mi)};
+      ::GetMonitorInfoW(m, &mi);
+      reinterpret_cast<std::vector<RECT>*>(p)->push_back(mi.rcWork);
+      return TRUE;
+    }, reinterpret_cast<LPARAM>(&works));
+    RECT home{};
+    ::GetWindowRect(hwnd, &home);
+    for (size_t i = 0; i < works.size(); ++i) {
+      ::ShowWindow(hwnd, SW_RESTORE);
+      ::SetWindowPos(hwnd, nullptr, works[i].left + 40, works[i].top + 40, 1000, 700, SWP_NOZORDER | SWP_NOACTIVATE);
+      const std::string at = "monitor " + std::to_string(i + 1) + " (dpi " + std::to_string(::GetDpiForWindow(hwnd)) + ")";
+      ::ShowWindow(hwnd, SW_MAXIMIZE);
+      round_trip((at + " maximized").c_str());
+      ::ShowWindow(hwnd, SW_RESTORE);
+      round_trip((at + " normal").c_str());
+    }
+    ::SetWindowPos(hwnd, nullptr, home.left, home.top, home.right - home.left, home.bottom - home.top,
+                   SWP_NOZORDER | SWP_NOACTIVATE);
+  }, [] { return true; });
+  // A snapped window (Win+Left): its placement's normal rect is its size
+  // before the snap, which leaving fullscreen must not shrink it to.
+  struct Snap {
+    RECT home{};
+    ULONGLONG t0 = 0;
+    bool sent = false;
+  };
+  auto snap = std::make_shared<Snap>();
+  r.Add("fullscreen: a snapped window comes back at its snapped size", [s, snap] {
+    HWND hwnd = s->window->hwnd();
+    ::GetWindowRect(hwnd, &snap->home);
+    snap->t0 = ::GetTickCount64();
+    // A process started in the background may not take the foreground; one
+    // attached to the foreground window's input may.
+    const DWORD front = ::GetWindowThreadProcessId(::GetForegroundWindow(), nullptr);
+    const DWORD self = ::GetCurrentThreadId();
+    const bool attached = front && front != self && ::AttachThreadInput(front, self, TRUE);
+    ::SetForegroundWindow(hwnd);
+    if (attached) ::AttachThreadInput(front, self, FALSE);
+    // Only into this window: never snap whatever else has the focus.
+    snap->sent = ::GetForegroundWindow() == hwnd;
+    if (snap->sent) {
+      INPUT in[4]{};
+      const WORD keys[4] = {VK_LWIN, VK_LEFT, VK_LEFT, VK_LWIN};
+      for (int i = 0; i < 4; ++i) {
+        in[i].type = INPUT_KEYBOARD;
+        in[i].ki.wVk = keys[i];
+        in[i].ki.dwFlags = i >= 2 ? KEYEVENTF_KEYUP : 0;
+      }
+      in[1].ki.dwFlags = KEYEVENTF_EXTENDEDKEY;
+      in[2].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+      ::SendInput(4, in, sizeof(INPUT));
+    }
+  }, [s, snap, &r] {
+    HWND hwnd = s->window->hwnd();
+    using IsArranged = BOOL(WINAPI*)(HWND);
+    static const auto is_arranged =
+        reinterpret_cast<IsArranged>(::GetProcAddress(::GetModuleHandleW(L"user32.dll"), "IsWindowArranged"));
+    const bool arranged = is_arranged && is_arranged(hwnd);
+    if (!arranged && snap->sent && ::GetTickCount64() - snap->t0 < 3000) return false;
+    if (!arranged) {
+      r.Check(true, "skipped: the window could not be snapped here (it was not in front)");
+      return true;
+    }
+    RECT before{}, after{};
+    ::GetWindowRect(hwnd, &before);
+    WINDOWPLACEMENT wp{sizeof(wp)};
+    ::GetWindowPlacement(hwnd, &wp);
+    r.Check(!::EqualRect(&before, &wp.rcNormalPosition), "snapped (its normal rect is another one)");
+    Tab* tab = s->window->active_tab();
+    s->window->SetContentFullscreen(tab, true);
+    s->window->SetContentFullscreen(tab, false);
+    ::GetWindowRect(hwnd, &after);
+    r.Check(::EqualRect(&before, &after) != FALSE,
+            "same window rect (" + std::to_string(after.right - after.left) + "x" +
+                std::to_string(after.bottom - after.top) + ", was " + std::to_string(before.right - before.left) +
+                "x" + std::to_string(before.bottom - before.top) + ")");
+    ::ShowWindow(hwnd, SW_RESTORE);
+    ::SetWindowPos(hwnd, nullptr, snap->home.left, snap->home.top, snap->home.right - snap->home.left,
+                   snap->home.bottom - snap->home.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    return true;
+  }, 5000);
+  // The same with a real page (a video's fullscreen button) in a maximized
+  // window, left with Esc and then by the page itself.
+  struct FsSize {
+    RECT before{}, client_before{};
+    ULONGLONG off_at = 0;
+  };
+  auto fz = std::make_shared<FsSize>();
+  auto click_fullscreen = [](Tab* t) {
+    static ULONGLONG clicked = 0;
+    if (::GetTickCount64() - clicked < 1500) return;
+    clicked = ::GetTickCount64();
+    CefMouseEvent e;
+    e.x = 60;
+    e.y = 60;
+    e.modifiers = 0;
+    CefRefPtr<CefBrowserHost> host = t->browser()->GetHost();
+    host->SendMouseMoveEvent(e, false);
+    host->SendMouseClickEvent(e, MBT_LEFT, false, 1);
+    host->SendMouseClickEvent(e, MBT_LEFT, true, 1);
+  };
+  auto same_size_after = [s, fz, &r](const char* how) {
+    HWND hwnd = s->window->hwnd();
+    if (s->window->content_fullscreen() || s->window->active_tab()->record().title != L"fs-off") return false;
+    if (!fz->off_at) fz->off_at = ::GetTickCount64();
+    if (::GetTickCount64() - fz->off_at < 1500) return false;  // every late resize has landed
+    fz->off_at = 0;
+    RECT after{}, client_after{};
+    ::GetWindowRect(hwnd, &after);
+    ::GetClientRect(hwnd, &client_after);
+    r.Check(::IsZoomed(hwnd) != FALSE, std::string(how) + ": still maximized");
+    r.Check(::EqualRect(&fz->before, &after) != FALSE,
+            std::string(how) + ": same window rect (" + std::to_string(after.left) + "," + std::to_string(after.top) +
+                " " + std::to_string(after.right - after.left) + "x" + std::to_string(after.bottom - after.top) +
+                ", was " + std::to_string(fz->before.left) + "," + std::to_string(fz->before.top) + " " +
+                std::to_string(fz->before.right - fz->before.left) + "x" +
+                std::to_string(fz->before.bottom - fz->before.top) + ")");
+    r.Check(::EqualRect(&fz->client_before, &client_after) != FALSE, std::string(how) + ": same page area");
+    return true;
+  };
+  r.Add("fullscreen: a maximized window's page goes fullscreen", [s, fs, fz, &r] {
     r.Check(fs->server.Start(), "test HTTP server listening");
+    ::ShowWindow(s->window->hwnd(), SW_MAXIMIZE);
+    ::GetWindowRect(s->window->hwnd(), &fz->before);
+    ::GetClientRect(s->window->hwnd(), &fz->client_before);
+    fs->video = s->window->OpenTab(fs->server.Url(L"/fullscreen"), true);
+  }, [s, fs, click_fullscreen] {
+    if (fs->video->loading() || !fs->video->browser() || fs->video->record().title.empty()) return false;
+    if (s->window->content_fullscreen() && fs->video->record().title == L"fs-on") return true;
+    click_fullscreen(fs->video);
+    return false;
+  }, 15000);
+  r.Add("... Esc leaves it: the window is maximized as before", [s] {
+    s->window->ExitContentFullscreen();  // what Esc does
+  }, [same_size_after] { return same_size_after("Esc"); }, 10000);
+  r.Add("... fullscreen again", [] {}, [s, fs, click_fullscreen] {
+    if (s->window->content_fullscreen() && fs->video->record().title == L"fs-on") return true;
+    click_fullscreen(fs->video);
+    return false;
+  }, 15000);
+  r.Add("... the page leaves it: the window is maximized as before", [fs] {
+    fs->video->browser()->GetMainFrame()->ExecuteJavaScript("document.exitFullscreen()", "", 0);
+  }, [s, fs, same_size_after] {
+    if (!same_size_after("page")) return false;
+    ::ShowWindow(s->window->hwnd(), SW_RESTORE);
+    s->window->CloseTabShortcut(fs->video);
+    return true;
+  }, 10000);
+  r.Add("... (maximized fullscreen tab closed)", [] {}, [s, fs] {
+    for (const auto& t : s->window->workspace()->tabs()) {
+      if (t.get() == fs->video) return false;
+    }
+    return true;
+  }, 10000);
+  r.Add("fullscreen: a page goes fullscreen", [s, fs] {
     fs->video = s->window->OpenTab(fs->server.Url(L"/fullscreen"), true);
   }, [s, fs] {
     if (fs->video->loading() || !fs->video->browser() || fs->video->record().title.empty()) return false;
